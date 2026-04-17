@@ -1,0 +1,70 @@
+[package]
+name = "gridtokenx-chain-bridge"
+version = "0.1.0"
+edition = "2024"
+description = "Decentralized signing authority and Solana blockchain interface"
+
+[dependencies]
+# Web Framework
+axum = { version = "0.8.7", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6.7", features = ["cors", "trace", "timeout"] }
+
+# Async Runtime
+tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "io-util", "time", "sync", "signal", "parking_lot"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Solana SDK
+anchor-client = "1.0.0"
+solana-client = "2.1.0"
+solana-sdk = "2.1.0"
+solana-transaction-status = "2.1.0"
+solana-rpc-client-api = "2.3.1"
+solana-account-decoder = "2.3.1"
+solana-transaction-status-client-types = "2.3.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+base64 = "0.21"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# HTTP Client
+reqwest = { version = "0.12", features = ["json"] }
+
+# gRPC
+connectrpc = { version = "0.2.1", features = ["axum", "server", "client"] }
+buffa = "0.2.0"
+http-body = "1.0.0"
+http = "1.0.0"
+
+# Shared Library
+gridtokenx-blockchain-core = { path = "../gridtokenx-blockchain-core" }
+
+# mTLS and Security
+axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+tokio-rustls = "0.26"
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2.1"
+x509-parser = "0.16"
+rcgen = "0.13"
+
+# Messaging
+async-nats = "0.37"
+
+# Utilities
+anyhow = "1.0"
+thiserror = "2.0"
+dotenvy = "0.15"
+dashmap = "6.1.0"
+tokio-retry = "0.3"
+
+[build-dependencies]
+buffa-build = "0.2.0"
+connectrpc-build = "0.2.0"
+tonic-build = "0.11"

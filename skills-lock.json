@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "skills": {
+    "axum-code-review": {
+      "source": "existential-birds/beagle",
+      "sourceType": "github",
+      "computedHash": "52192e867778ae7a6a7882f635ccfee44ee87f2ab3c38b20c8f439d63d4ed889"
+    },
+    "rust-best-practices": {
+      "source": "existential-birds/beagle",
+      "sourceType": "github",
+      "computedHash": "931cef4a434b0764d0eb8e0d83a9f48b12ba608652a1fbcd1b1959f96a068b5a"
+    },
+    "rust-code-review": {
+      "source": "existential-birds/beagle",
+      "sourceType": "github",
+      "computedHash": "bd7f5f55059b94407f2aa45f9732bd2df97b7a87339429f7a41c29ce5645be1c"
+    },
+    "tokio-async-code-review": {
+      "source": "existential-birds/beagle",
+      "sourceType": "github",
+      "computedHash": "403df61908f25ba2713565ef77623db2f3f78259b3d5830e5ea1e60745629da9"
+    }
+  }
+}
