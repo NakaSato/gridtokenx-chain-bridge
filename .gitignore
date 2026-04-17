@@ -1,0 +1,164 @@
+
+/test-ladger-oracle/
+*.pem
+.sqlx/*
+.vendor/*
+*.pid
+*.snapshot
+# Environment Variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Operating System
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*~
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+*.bak
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Node.js / JavaScript / TypeScript
+node_modules/
+.pnp
+.pnp.js
+.npm
+.eslintcache
+.node_repl_history
+*.tsbuildinfo
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz
+
+# Next.js
+.next/
+out/
+build/
+dist/
+.cache/
+
+# Bun
+bun.lockb
+
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Anchor / Solana
+.anchor/
+test-ledger/
+.keys/
+*.so
+*.keypair
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.cover
+.hypothesis/
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Docker
+*.log
+docker-compose.override.yml
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Backups
+backups/
+*.sql
+*.dump
+
+# Testing
+coverage/
+.nyc_output/
+*.lcov
+
+# Build artifacts
+*.tar.gz
+*.zip
+*.rar
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Package manager locks (optional - uncomment if you want to ignore)
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
+# Cargo.lock
+
+# Local development
+.local/
+.cache/
+
+# Documentation builds
+docs/_build/
+site/
+
+# Certificates and keys
+*.pem
+*.key
+*.cert
+*.crt
+*.p12
+*.pfx
+
+# Secrets
+secrets/
+*.secret
+.secrets
+
+# macOS
+.AppleDouble
+.LSOverride
+Icon
