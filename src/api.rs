@@ -24,9 +24,12 @@ use chain_v1::{
     SimulateTransactionRequest, SimulateTransactionRequestView, SimulateTransactionResponse,
     SubmitTransactionRequest, SubmitTransactionRequestView, SubmitTransactionResponse,
     PrioritizationFee,
+    GetEpochInfoRequest, GetEpochInfoRequestView, GetEpochInfoResponse,
+    RequestAirdropRequest, RequestAirdropResponse,
+    GetTransactionDetailsRequest, GetTransactionDetailsResponse,
 };
 
-use solana_client::rpc_client::RpcClient;
+use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::client_error::ClientError;
 use solana_sdk::account::Account;
 use solana_sdk::hash::Hash;
@@ -37,19 +40,45 @@ use solana_sdk::pubkey::Pubkey;
 use solana_sdk::transaction::Transaction;
 use std::sync::Arc;
 use async_trait::async_trait;
+use tokio::sync::RwLock;
+
+/// Blockhash cache for high-throughput signing
+pub struct BlockhashCache {
+    current: RwLock<Option<(Hash, u64)>>,
+}
+
+impl BlockhashCache {
+    pub fn new() -> Self {
+        Self {
+            current: RwLock::new(None),
+        }
+    }
+
+    pub async fn update(&self, hash: Hash, last_valid_block_height: u64) {
+        let mut lock = self.current.write().await;
+        *lock = Some((hash, last_valid_block_height));
+    }
+
+    pub async fn get(&self) -> Option<(Hash, u64)> {
+        *self.current.read().await
+    }
+}
 
 /// Abstraction layer for Solana RPC interactions to enable mocking in tests.
 #[async_trait]
 pub trait SolanaProvider: Send + Sync {
-    fn simulate_transaction(&self, transaction: &Transaction) -> Result<Response<RpcSimulateTransactionResult>, ClientError>;
-    fn send_transaction(&self, transaction: &Transaction) -> Result<Signature, ClientError>;
-    fn get_latest_blockhash(&self) -> Result<(Hash, u64), ClientError>;
-    fn get_balance(&self, pubkey: &Pubkey) -> Result<u64, ClientError>;
-    fn get_account(&self, pubkey: &Pubkey) -> Result<Account, ClientError>;
-    fn get_recent_prioritization_fees(&self, pubkeys: &[Pubkey]) -> Result<Vec<RpcPrioritizationFee>, ClientError>;
-    fn get_token_account_balance(&self, pubkey: &Pubkey) -> Result<serde_json::Value, ClientError>;
-    fn get_signature_statuses(&self, signatures: &[Signature]) -> Result<Response<Vec<Option<serde_json::Value>>>, ClientError>;
-    fn get_slot(&self) -> Result<u64, ClientError>;
+    async fn simulate_transaction(&self, transaction: &Transaction) -> Result<Response<RpcSimulateTransactionResult>, ClientError>;
+    async fn send_transaction(&self, transaction: &Transaction) -> Result<Signature, ClientError>;
+    async fn get_latest_blockhash(&self) -> Result<(Hash, u64), ClientError>;
+    async fn get_balance(&self, pubkey: &Pubkey) -> Result<u64, ClientError>;
+    async fn get_account(&self, pubkey: &Pubkey) -> Result<Account, ClientError>;
+    async fn get_recent_prioritization_fees(&self, pubkeys: &[Pubkey]) -> Result<Vec<RpcPrioritizationFee>, ClientError>;
+    async fn get_token_account_balance(&self, pubkey: &Pubkey) -> Result<serde_json::Value, ClientError>;
+    async fn get_signature_statuses(&self, signatures: &[Signature]) -> Result<Response<Vec<Option<serde_json::Value>>>, ClientError>;
+    async fn get_slot(&self) -> Result<u64, ClientError>;
+    async fn request_airdrop(&self, pubkey: &Pubkey, lamports: u64) -> Result<Signature, ClientError>;
+    async fn get_transaction(&self, signature: &Signature) -> Result<serde_json::Value, ClientError>;
+    async fn get_epoch_info(&self) -> Result<solana_sdk::epoch_info::EpochInfo, ClientError>;
 }
 
 /// Real implementation of SolanaProvider using RpcClient.
@@ -67,51 +96,399 @@ impl RealSolanaProvider {
 
 #[async_trait]
 impl SolanaProvider for RealSolanaProvider {
-    fn simulate_transaction(&self, transaction: &Transaction) -> Result<Response<RpcSimulateTransactionResult>, ClientError> {
-        self.client.simulate_transaction(transaction)
+    async fn simulate_transaction(&self, transaction: &Transaction) -> Result<Response<RpcSimulateTransactionResult>, ClientError> {
+        self.client.simulate_transaction(transaction).await
     }
-    fn send_transaction(&self, transaction: &Transaction) -> Result<Signature, ClientError> {
-        self.client.send_transaction(transaction)
+    async fn send_transaction(&self, transaction: &Transaction) -> Result<Signature, ClientError> {
+        self.client.send_transaction(transaction).await
     }
-    fn get_latest_blockhash(&self) -> Result<(Hash, u64), ClientError> {
-        self.client.get_latest_blockhash_with_commitment(self.client.commitment())
+    async fn get_latest_blockhash(&self) -> Result<(Hash, u64), ClientError> {
+        self.client.get_latest_blockhash_with_commitment(self.client.commitment()).await
     }
-    fn get_balance(&self, pubkey: &Pubkey) -> Result<u64, ClientError> {
-        self.client.get_balance(pubkey)
+    async fn get_balance(&self, pubkey: &Pubkey) -> Result<u64, ClientError> {
+        self.client.get_balance(pubkey).await
     }
-    fn get_account(&self, pubkey: &Pubkey) -> Result<Account, ClientError> {
-        self.client.get_account(pubkey)
+    async fn get_account(&self, pubkey: &Pubkey) -> Result<Account, ClientError> {
+        self.client.get_account(pubkey).await
     }
-    fn get_recent_prioritization_fees(&self, pubkeys: &[Pubkey]) -> Result<Vec<RpcPrioritizationFee>, ClientError> {
-        self.client.get_recent_prioritization_fees(pubkeys)
+    async fn get_recent_prioritization_fees(&self, pubkeys: &[Pubkey]) -> Result<Vec<RpcPrioritizationFee>, ClientError> {
+        self.client.get_recent_prioritization_fees(pubkeys).await
     }
-    fn get_token_account_balance(&self, pubkey: &Pubkey) -> Result<serde_json::Value, ClientError> {
-        self.client.get_token_account_balance(pubkey).map(|b| serde_json::to_value(b).unwrap())
+    async fn get_token_account_balance(&self, pubkey: &Pubkey) -> Result<serde_json::Value, ClientError> {
+        self.client.get_token_account_balance(pubkey).await.map(|b| serde_json::to_value(b).unwrap())
     }
-    fn get_signature_statuses(&self, signatures: &[Signature]) -> Result<Response<Vec<Option<serde_json::Value>>>, ClientError> {
-        let resp = self.client.get_signature_statuses(signatures)?;
+    async fn get_signature_statuses(&self, signatures: &[Signature]) -> Result<Response<Vec<Option<serde_json::Value>>>, ClientError> {
+        let resp = self.client.get_signature_statuses(signatures).await?;
         let value = resp.value.into_iter().map(|opt| opt.map(|s| serde_json::to_value(s).unwrap())).collect();
         Ok(Response { context: resp.context, value })
     }
-    fn get_slot(&self) -> Result<u64, ClientError> {
-        self.client.get_slot()
+    async fn get_slot(&self) -> Result<u64, ClientError> {
+        self.client.get_slot().await
+    }
+    async fn request_airdrop(&self, pubkey: &Pubkey, lamports: u64) -> Result<Signature, ClientError> {
+        self.client.request_airdrop(pubkey, lamports).await
+    }
+    async fn get_transaction(&self, signature: &Signature) -> Result<serde_json::Value, ClientError> {
+        self.client.get_transaction_with_config(
+            signature,
+            solana_client::rpc_config::RpcTransactionConfig {
+                encoding: Some(solana_transaction_status::UiTransactionEncoding::Json),
+                commitment: Some(self.client.commitment()),
+                max_supported_transaction_version: Some(0),
+            }
+        ).await.map(|tx| serde_json::to_value(tx).unwrap())
+    }
+    async fn get_epoch_info(&self) -> Result<solana_sdk::epoch_info::EpochInfo, ClientError> {
+        let info = self.client.get_epoch_info().await?;
+        Ok(solana_sdk::epoch_info::EpochInfo {
+            absolute_slot: info.absolute_slot,
+            block_height: info.block_height,
+            epoch: info.epoch,
+            slots_in_epoch: info.slots_in_epoch,
+            slot_index: info.slot_index,
+            transaction_count: info.transaction_count,
+        })
     }
 }
 
+use litesvm::LiteSVM;
+
+/// Implementation of SolanaProvider using LiteSVM for in-memory simulation.
+/// It can lazily fetch accounts from a real RPC to simulate mainnet state.
+pub struct SurfpoolSolanaProvider {
+    svm: Arc<RwLock<LiteSVM>>,
+    rpc_client: Option<RpcClient>,
+}
+
+impl SurfpoolSolanaProvider {
+    pub async fn new(rpc_url: Option<String>) -> anyhow::Result<Self> {
+        let svm = LiteSVM::new();
+        let rpc_client = rpc_url.map(RpcClient::new);
+        
+        info!("🌊 Surfpool (LiteSVM) initialized");
+        if rpc_client.is_some() {
+            info!("🔗 Mainnet state cloning enabled via RPC");
+        }
+        
+        let mut provider = Self {
+            svm: Arc::new(RwLock::new(svm)),
+            rpc_client,
+        };
+        
+        provider.deploy_core_programs().await?;
+        
+        Ok(provider)
+    }
+
+    async fn deploy_core_programs(&mut self) -> anyhow::Result<()> {
+        let mut svm = self.svm.write().await;
+        
+        let programs = [
+            ("HZR6b8GhzhDowyL6dX58qBjdSDNtFyJHU5dPF3kXDcTS", "gridtokenx-anchor/target/deploy/registry.so"),
+            ("GjSjmPt8VSHr49ti4BijWZSu7rwb8o32pod7gNBnTY4U", "gridtokenx-anchor/target/deploy/energy_token.so"),
+            ("DXxHdUar3pUUKRnt4XAMA8rdYRpAsNY1xk3Zo4crShvY", "gridtokenx-anchor/target/deploy/trading.so"),
+            ("AiWcoPDEk3G4iKrDXj1wCN1ffWxQDEsgtJZKcjauoFJr", "gridtokenx-anchor/target/deploy/oracle.so"),
+            ("6FsfuFEg8LHjSiejc8om8Q6iSaAgfEWHCgz78PT8jocw", "gridtokenx-anchor/target/deploy/governance.so"),
+        ];
+
+        for (id_str, path) in programs {
+            let pubkey = Pubkey::from_str(id_str)?;
+            let address = solana_address::Address::from(pubkey.to_bytes());
+            
+            if let Ok(program_data) = std::fs::read(path) {
+                info!("🚀 Deploying program {} from {} to LiteSVM", id_str, path);
+                let _ = svm.add_program(address, &program_data);
+            } else {
+                warn!("⚠️ Could not find program SO at {}. Skipping deployment for {}.", path, id_str);
+            }
+        }
+
+        // --- PDA CALCULATIONS ---
+        let auth_pubkey = Pubkey::from_str("EzudwoHvNPAc4dpPi5ndU8MEZVHVzq3Pj3Thm9ooKmiJ")?;
+        let registry_program_id = Pubkey::from_str("HZR6b8GhzhDowyL6dX58qBjdSDNtFyJHU5dPF3kXDcTS")?;
+        let energy_program_id = Pubkey::from_str("GjSjmPt8VSHr49ti4BijWZSu7rwb8o32pod7gNBnTY4U")?;
+        
+        let (registry_pda, _) = Pubkey::find_program_address(&[b"registry"], &registry_program_id);
+        let (token_info_pda, _) = Pubkey::find_program_address(&[b"token_info_2022"], &energy_program_id);
+
+        // --- TOKEN MINTS ---
+        let token_program_id = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")?;
+        let token_program_address = solana_address::Address::from(token_program_id.to_bytes());
+
+        // Initialize Energy Token Mint (GpGDVgksF2ivMv3XXR4VZDXRmW9G6agA2AGkKUBQRzk6)
+        let mint_pubkey = Pubkey::from_str("GpGDVgksF2ivMv3XXR4VZDXRmW9G6agA2AGkKUBQRzk6")?;
+        let mint_address = solana_address::Address::from(mint_pubkey.to_bytes());
+        
+        let mut data = vec![0u8; 82];
+        data[0..4].copy_from_slice(&1u32.to_le_bytes()); // COption::Some
+        data[4..36].copy_from_slice(&token_info_pda.to_bytes()); // Authority MUST be token_info_pda
+        data[44] = 9;
+        data[45] = 1;
+        
+        let mint_account = solana_account::Account {
+            lamports: 1_000_000_000,
+            data,
+            owner: token_program_address,
+            executable: false,
+            rent_epoch: 0,
+        };
+        let _ = svm.set_account(mint_address, mint_account);
+        info!("🪙 Initialized Energy Token Mint in LiteSVM: {}. Authority set to TokenInfo PDA: {}", mint_pubkey, token_info_pda);
+
+        // Initialize Currency Token Mint (8BGFtQLRaY9Nh5BGUwjJvdeXEsscCgJAi5zTgALk1Vg5)
+        let currency_pubkey = Pubkey::from_str("8BGFtQLRaY9Nh5BGUwjJvdeXEsscCgJAi5zTgALk1Vg5")?;
+        let currency_address = solana_address::Address::from(currency_pubkey.to_bytes());
+        
+        let mut currency_data = vec![0u8; 82];
+        currency_data[0..4].copy_from_slice(&1u32.to_le_bytes()); // COption::Some
+        currency_data[4..36].copy_from_slice(&auth_pubkey.to_bytes()); // Admin is okay for currency
+        currency_data[44] = 6;
+        currency_data[45] = 1;
+        
+        let currency_account = solana_account::Account {
+            lamports: 1_000_000_000,
+            data: currency_data,
+            owner: token_program_address,
+            executable: false,
+            rent_epoch: 0,
+        };
+        let _ = svm.set_account(currency_address, currency_account);
+        info!("🪙 Initialized Currency Token Mint in LiteSVM: {}", currency_pubkey);
+
+        // --- REGISTRY ACCOUNTS ---
+        let registry_program_address = solana_address::Address::from(registry_program_id.to_bytes());
+        let registry_address = solana_address::Address::from(registry_pda.to_bytes());
+
+        let mut registry_data = vec![0u8; 104];
+        registry_data[0..8].copy_from_slice(&[47, 174, 110, 246, 184, 182, 252, 218]); // account:Registry
+        registry_data[8..40].copy_from_slice(&auth_pubkey.to_bytes());
+        let registry_account = solana_account::Account {
+            lamports: 1_000_000_000,
+            data: registry_data,
+            owner: registry_program_address,
+            executable: false,
+            rent_epoch: 0,
+        };
+        let _ = svm.set_account(registry_address, registry_account);
+        info!("📋 Initialized Registry PDA in LiteSVM: {}", registry_pda);
+
+        let (shard_pda, _) = Pubkey::find_program_address(&[b"registry_shard", &[0u8]], &registry_program_id);
+        let shard_address = solana_address::Address::from(shard_pda.to_bytes());
+        let mut shard_data = vec![0u8; 32];
+        shard_data[0..8].copy_from_slice(&[98, 27, 121, 8, 54, 239, 169, 252]); // account:RegistryShard
+        let shard_account = solana_account::Account {
+            lamports: 1_000_000_000,
+            data: shard_data,
+            owner: registry_program_address,
+            executable: false,
+            rent_epoch: 0,
+        };
+        let _ = svm.set_account(shard_address, shard_account);
+        info!("📋 Initialized RegistryShard 0 in LiteSVM: {}", shard_pda);
+
+        // --- ENERGY TOKEN ACCOUNTS ---
+        let energy_program_address = solana_address::Address::from(energy_program_id.to_bytes());
+        let token_info_address = solana_address::Address::from(token_info_pda.to_bytes());
+        let mut token_info_data = vec![0u8; 320];
+        token_info_data[0..8].copy_from_slice(&[109, 162, 52, 125, 77, 166, 37, 202]); // account:TokenInfo
+        token_info_data[8..40].copy_from_slice(&auth_pubkey.to_bytes());
+        token_info_data[40..72].copy_from_slice(&registry_pda.to_bytes());
+        token_info_data[72..104].copy_from_slice(&registry_program_id.to_bytes());
+        token_info_data[104..136].copy_from_slice(&mint_pubkey.to_bytes());
+        let token_info_account = solana_account::Account {
+            lamports: 1_000_000_000,
+            data: token_info_data,
+            owner: energy_program_address,
+            executable: false,
+            rent_epoch: 0,
+        };
+        let _ = svm.set_account(token_info_address, token_info_account);
+        info!("📋 Initialized TokenInfo PDA in LiteSVM: {}", token_info_pda);
+
+        Ok(())
+    }
+
+    async fn ensure_account(&self, pubkey: &Pubkey) -> Result<(), ClientError> {
+        let mut svm = self.svm.write().await;
+        let address = solana_address::Address::from(pubkey.to_bytes());
+        if svm.get_account(&address).is_none() {
+            if let Some(ref client) = self.rpc_client {
+                info!("🔍 Cloning account {} from mainnet...", pubkey);
+                let account = client.get_account(pubkey).await?;
+                let svm_account = solana_account::Account {
+                    lamports: account.lamports,
+                    data: account.data,
+                    owner: solana_address::Address::from(account.owner.to_bytes()),
+                    executable: account.executable,
+                    rent_epoch: account.rent_epoch,
+                };
+                svm.set_account(address, svm_account)
+                    .map_err(|e| ClientError::from(solana_client::client_error::ClientErrorKind::Custom(e.to_string())))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl SolanaProvider for SurfpoolSolanaProvider {
+    async fn simulate_transaction(&self, transaction: &Transaction) -> Result<Response<RpcSimulateTransactionResult>, ClientError> {
+        // Ensure all accounts in the transaction are cloned if needed
+        for message in &transaction.message.instructions {
+            for key_idx in &message.accounts {
+                if let Some(key) = transaction.message.account_keys.get(*key_idx as usize) {
+                    self.ensure_account(key).await?;
+                }
+            }
+        }
+
+        let mut svm = self.svm.write().await;
+        // Convert Transaction to VersionedTransaction via binary serialization
+        let bytes = bincode::serialize(transaction).map_err(|e| ClientError::from(solana_client::client_error::ClientErrorKind::Custom(e.to_string())))?;
+        let versioned_tx: solana_transaction::versioned::VersionedTransaction = bincode::deserialize(&bytes)
+            .map_err(|e| ClientError::from(solana_client::client_error::ClientErrorKind::Custom(e.to_string())))?;
+        
+        let result = svm.simulate_transaction(versioned_tx)
+            .map_err(|e| ClientError::from(solana_client::client_error::ClientErrorKind::Custom(format!("{:?}", e))))?;
+        
+        Ok(Response {
+            context: solana_client::rpc_response::RpcResponseContext { slot: 0, api_version: None },
+            value: RpcSimulateTransactionResult {
+                err: None, // If we are here, simulation succeeded
+                logs: Some(result.meta.logs.clone()),
+                accounts: None,
+                units_consumed: Some(result.meta.compute_units_consumed),
+                return_data: None,
+                inner_instructions: None,
+                loaded_accounts_data_size: None,
+                replacement_blockhash: None,
+            },
+        })
+    }
+
+    async fn send_transaction(&self, transaction: &Transaction) -> Result<Signature, ClientError> {
+        // Ensure payer exists and has SOL before sending in simnet
+        if let Some(payer) = transaction.message.account_keys.first() {
+             let mut svm = self.svm.write().await;
+             let address = solana_address::Address::from(payer.to_bytes());
+             let balance = svm.get_balance(&address).unwrap_or(0);
+             if balance < 1_000_000_000 {
+                 info!("💸 Ensuring payer {} has SOL (current balance: {}). Airdropping 10 SOL...", payer, balance);
+                 svm.airdrop(&address, 10_000_000_000)
+                     .map_err(|e| ClientError::from(solana_client::client_error::ClientErrorKind::Custom(format!("{:?}", e))))?;
+             }
+        }
+
+        let mut svm = self.svm.write().await;
+        let signature = transaction.signatures.first().cloned().unwrap_or_default();
+        
+        // Convert Transaction to VersionedTransaction via binary serialization
+        let bytes = bincode::serialize(transaction).map_err(|e| ClientError::from(solana_client::client_error::ClientErrorKind::Custom(e.to_string())))?;
+        let versioned_tx: solana_transaction::versioned::VersionedTransaction = bincode::deserialize(&bytes)
+            .map_err(|e| ClientError::from(solana_client::client_error::ClientErrorKind::Custom(e.to_string())))?;
+
+        svm.send_transaction(versioned_tx)
+            .map_err(|e| ClientError::from(solana_client::client_error::ClientErrorKind::Custom(format!("{:?}", e))))?;
+        
+        Ok(signature)
+    }
+
+
+    async fn get_latest_blockhash(&self) -> Result<(Hash, u64), ClientError> {
+        let svm = self.svm.read().await;
+        let hash = svm.latest_blockhash();
+        Ok((Hash::new_from_array(hash.to_bytes()), 1000))
+    }
+
+    async fn get_balance(&self, pubkey: &Pubkey) -> Result<u64, ClientError> {
+        self.ensure_account(pubkey).await?;
+        let svm = self.svm.read().await;
+        let address = solana_address::Address::from(pubkey.to_bytes());
+        Ok(svm.get_balance(&address).unwrap_or(0))
+    }
+
+    async fn get_account(&self, pubkey: &Pubkey) -> Result<Account, ClientError> {
+        self.ensure_account(pubkey).await?;
+        let svm = self.svm.read().await;
+        let address = solana_address::Address::from(pubkey.to_bytes());
+        let account = svm.get_account(&address)
+            .ok_or_else(|| ClientError::from(solana_client::client_error::ClientErrorKind::Custom("Account not found".to_string())))?;
+        
+        Ok(Account {
+            lamports: account.lamports,
+            data: account.data,
+            owner: Pubkey::new_from_array(account.owner.to_bytes()),
+            executable: account.executable,
+            rent_epoch: account.rent_epoch,
+        })
+    }
+
+    async fn get_recent_prioritization_fees(&self, _pubkeys: &[Pubkey]) -> Result<Vec<RpcPrioritizationFee>, ClientError> {
+        Ok(vec![])
+    }
+
+    async fn get_token_account_balance(&self, _pubkey: &Pubkey) -> Result<serde_json::Value, ClientError> {
+        Ok(serde_json::json!({"amount": "1000000000", "decimals": 9, "uiAmount": 1.0}))
+    }
+
+    async fn get_signature_statuses(&self, signatures: &[Signature]) -> Result<Response<Vec<Option<serde_json::Value>>>, ClientError> {
+        let values = signatures.iter().map(|_| Some(serde_json::json!({"slot": 0, "confirmations": 1, "err": null, "confirmationStatus": "finalized"}))).collect();
+        Ok(Response {
+            context: solana_client::rpc_response::RpcResponseContext { slot: 0, api_version: None },
+            value: values,
+        })
+    }
+
+    async fn get_slot(&self) -> Result<u64, ClientError> {
+        Ok(0)
+    }
+
+    async fn request_airdrop(&self, pubkey: &Pubkey, lamports: u64) -> Result<Signature, ClientError> {
+        let mut svm = self.svm.write().await;
+        let address = solana_address::Address::from(pubkey.to_bytes());
+        svm.airdrop(&address, lamports)
+            .map_err(|e| ClientError::from(solana_client::client_error::ClientErrorKind::Custom(format!("{:?}", e))))?;
+        Ok(Signature::default())
+    }
+
+    async fn get_transaction(&self, _signature: &Signature) -> Result<serde_json::Value, ClientError> {
+        Ok(serde_json::json!({}))
+    }
+
+    async fn get_epoch_info(&self) -> Result<solana_sdk::epoch_info::EpochInfo, ClientError> {
+        Ok(solana_sdk::epoch_info::EpochInfo {
+            absolute_slot: 100,
+            block_height: 100,
+            epoch: 1,
+            slots_in_epoch: 432000,
+            slot_index: 100,
+            transaction_count: Some(1000),
+        })
+    }
+}
+
+use crate::vault::VaultProvider;
+
 pub struct ChainBridgeGrpcService {
     provider: Arc<dyn SolanaProvider>,
-    vault: Arc<crate::vault::VaultTransitClient>,
+    vault: Arc<dyn VaultProvider>,
+    blockhash_cache: Arc<BlockhashCache>,
     transit_key_name: String,
 }
 
 impl ChainBridgeGrpcService {
-    pub fn new(provider: Arc<dyn SolanaProvider>, vault: Arc<crate::vault::VaultTransitClient>) -> Self {
+    pub fn new(
+        provider: Arc<dyn SolanaProvider>, 
+        vault: Arc<dyn VaultProvider>,
+        blockhash_cache: Arc<BlockhashCache>,
+    ) -> Self {
         let transit_key_name = std::env::var("CHAIN_BRIDGE_VAULT_KEY_NAME")
             .unwrap_or_else(|_| "gridtokenx-bridge".to_string());
 
         Self {
             provider,
             vault,
+            blockhash_cache,
             transit_key_name,
         }
     }
@@ -126,7 +503,7 @@ impl ChainBridgeGrpcService {
         if let Some(spiffe_id) = ctx.headers.get("z-gridtokenx-spiffe-id").and_then(|v| v.to_str().ok()) {
             let identity = gridtokenx_blockchain_core::auth::SpiffeIdentity(spiffe_id.to_string());
             let role = ServiceRole::from(&identity);
-            info!("mTLS peer verified (via header) → identity: {} role: {}", spiffe_id, role);
+            info!("mTLS peer verified → identity: {} role: {}", spiffe_id, role);
             return role;
         }
 
@@ -148,44 +525,48 @@ impl ChainBridgeGrpcService {
     /// Reusable signing and submission logic for both gRPC and NATS
     pub async fn sign_and_submit(&self, serialized_tx: &[u8], key_id: &str) -> anyhow::Result<(Signature, u64)> {
         let mut transaction: Transaction = bincode::deserialize(serialized_tx)
-            .map_err(|e| anyhow::anyhow!("Invalid transaction: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Invalid transaction format: {}", e))?;
 
         if key_id == "platform_admin" {
-            let bh = self.provider.get_latest_blockhash()
-                .map_err(|e| anyhow::anyhow!("Failed to get blockhash: {}", e))?;
+            // 1. Refresh blockhash from cache (Wall 1 mitigation in SKILL.md)
+            let (bh, _) = match self.blockhash_cache.get().await {
+                Some(cached) => cached,
+                None => {
+                    // Fallback to slow path if cache is empty (e.g. at startup)
+                    info!("⚠️ Blockhash cache empty, performing slow-path RPC refresh");
+                    self.provider.get_latest_blockhash().await
+                        .map_err(|e| anyhow::anyhow!("Failed to refresh blockhash: {}", e))?
+                }
+            };
             
-            transaction.message.recent_blockhash = bh.0;
+            transaction.message.recent_blockhash = bh;
 
-            // Vault Transit signing flow
-            // 1. Get the message data to sign
+            // 2. Sign the message data, not the whole transaction
             let message_data = transaction.message_data();
+            let num_required = transaction.message.header.num_required_signatures as usize;
+            let account_keys = &transaction.message.account_keys;
             
-            // 2. Request signature from Vault
+            info!("📝 Signing transaction for {} required signatures. Payer: {}", num_required, account_keys[0]);
+            
+            // 3. Request signature from Vault
             let signature = self.vault.sign_message(&self.transit_key_name, &message_data).await
                 .context("Vault Transit signing failed")?;
 
-            // 3. Attach signature to transaction
-            // Solana transactions have a fixed size signatures vector corresponding to num_required_signatures
-            if transaction.signatures.is_empty() {
-                transaction.signatures.push(signature);
-            } else {
-                transaction.signatures[0] = signature;
+            // 4. Attach signature at slot 0 (the fee payer slot)
+            // Ensure the signatures vector is correctly sized
+            if transaction.signatures.len() < num_required {
+                transaction.signatures.resize(num_required, Signature::default());
             }
-
-            info!("✅ Transaction signed remotely via Vault Transit for platform_admin");
             
-            tracing::debug!(
-                correlation_id = %key_id,
-                num_accounts = transaction.message.account_keys.len(),
-                num_instructions = transaction.message.instructions.len(),
-                "Transaction submitted"
-            );
+            transaction.signatures[0] = signature;
+
+            info!("✅ Transaction signed remotely via Vault Transit for platform_admin. Signature: {}", signature);
         } else if !key_id.is_empty() {
              return Err(anyhow::anyhow!("Key ID not authorized: {}", key_id));
         }
 
-        let sig = self.provider.send_transaction(&transaction)
-            .map_err(|e| anyhow::anyhow!("Solana RPC error: {}", e))?;
+        let sig = self.provider.send_transaction(&transaction).await
+            .map_err(|e| anyhow::anyhow!("Solana RPC submission failed: {}", e))?;
 
         Ok((sig, 0))
     }
@@ -198,15 +579,15 @@ impl ChainBridgeService for ChainBridgeGrpcService {
         request: OwnedView<SimulateTransactionRequestView<'static>>,
     ) -> Result<(SimulateTransactionResponse, Context), ConnectError> {
         let role = self.extract_role(&ctx);
-        role.require_any(&[ServiceRole::TradingMatcher, ServiceRole::OracleBridge, ServiceRole::IamService, ServiceRole::Admin])
+        role.require_any(&[ServiceRole::TradingApi, ServiceRole::TradingMatcher, ServiceRole::OracleBridge, ServiceRole::IamService, ServiceRole::Admin])
             .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
 
         info!("🔗 gRPC Received simulate_transaction request for key_id: {}", request.key_id);
         
         let tx: Transaction = bincode::deserialize(&request.serialized_transaction)
-            .map_err(|e| ConnectError::new(ErrorCode::InvalidArgument, e.to_string()))?;
+            .map_err(|e| ConnectError::new(ErrorCode::InvalidArgument, format!("Invalid transaction format: {}", e)))?;
 
-        match self.provider.simulate_transaction(&tx) {
+        match self.provider.simulate_transaction(&tx).await {
             Ok(resp) => {
                 let mut response = SimulateTransactionResponse::default();
                 response.success = resp.value.err.is_none();
@@ -214,7 +595,10 @@ impl ChainBridgeService for ChainBridgeGrpcService {
                 response.logs = resp.value.logs.unwrap_or_default();
                 Ok((response, ctx))
             }
-            Err(e) => Err(ConnectError::new(ErrorCode::Internal, e.to_string())),
+            Err(e) => {
+                error!("Solana RPC simulate error: {}", e);
+                Err(ConnectError::new(ErrorCode::Internal, "Solana RPC simulation failed"))
+            }
         }
     }
 
@@ -224,7 +608,7 @@ impl ChainBridgeService for ChainBridgeGrpcService {
         request: OwnedView<SubmitTransactionRequestView<'static>>,
     ) -> Result<(SubmitTransactionResponse, Context), ConnectError> {
         let role = self.extract_role(&ctx);
-        role.require_any(&[ServiceRole::TradingMatcher, ServiceRole::OracleBridge, ServiceRole::IamService, ServiceRole::Admin])
+        role.require_any(&[ServiceRole::TradingApi, ServiceRole::TradingMatcher, ServiceRole::OracleBridge, ServiceRole::IamService, ServiceRole::Admin])
             .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
 
         info!("🔗 gRPC Received submit_transaction request with key_id: {}", request.key_id);
@@ -242,12 +626,16 @@ impl ChainBridgeService for ChainBridgeGrpcService {
             }
             Err(e) => {
                 let err_msg = format!("{:#}", e);
-                let code = if err_msg.contains("authorized") || err_msg.contains("PermissionDenied") {
-                    ErrorCode::PermissionDenied
+                error!("Transaction submission failed: {}", err_msg);
+                
+                let (code, msg) = if err_msg.contains("authorized") {
+                    (ErrorCode::PermissionDenied, "Key ID not authorized")
+                } else if err_msg.contains("format") {
+                    (ErrorCode::InvalidArgument, "Invalid transaction format")
                 } else {
-                    ErrorCode::Internal
+                    (ErrorCode::Internal, "Transaction submission failed")
                 };
-                Err(ConnectError::new(code, err_msg))
+                Err(ConnectError::new(code, msg))
             }
         }
     }
@@ -271,15 +659,18 @@ impl ChainBridgeService for ChainBridgeGrpcService {
         info!("🔗 gRPC Received get_balance for {}", request.pubkey);
         
         let pubkey = Pubkey::from_str(&request.pubkey)
-            .map_err(|e| ConnectError::new(ErrorCode::InvalidArgument, e.to_string()))?;
+            .map_err(|e| ConnectError::new(ErrorCode::InvalidArgument, format!("Invalid pubkey: {}", e)))?;
 
-        match self.provider.get_balance(&pubkey) {
+        match self.provider.get_balance(&pubkey).await {
             Ok(lamports) => {
                 let mut response = GetBalanceResponse::default();
                 response.lamports = lamports;
                 Ok((response, ctx))
             }
-            Err(e) => Err(ConnectError::new(ErrorCode::Internal, e.to_string())),
+            Err(e) => {
+                error!("Solana RPC get_balance error for {}: {}", request.pubkey, e);
+                Err(ConnectError::new(ErrorCode::Internal, "Failed to fetch balance"))
+            }
         }
     }
 
@@ -302,9 +693,9 @@ impl ChainBridgeService for ChainBridgeGrpcService {
         info!("🔗 gRPC Received get_account_data for {}", request.pubkey);
         
         let pubkey = Pubkey::from_str(&request.pubkey)
-            .map_err(|e| ConnectError::new(ErrorCode::InvalidArgument, e.to_string()))?;
+            .map_err(|e| ConnectError::new(ErrorCode::InvalidArgument, format!("Invalid pubkey: {}", e)))?;
 
-        match self.provider.get_account(&pubkey) {
+        match self.provider.get_account(&pubkey).await {
             Ok(account) => {
                 let mut response = GetAccountDataResponse::default();
                 response.exists = true;
@@ -318,7 +709,8 @@ impl ChainBridgeService for ChainBridgeGrpcService {
                      response.data = vec![];
                      Ok((response, ctx))
                 } else {
-                    Err(ConnectError::new(ErrorCode::Internal, e.to_string()))
+                    error!("Solana RPC get_account error for {}: {}", request.pubkey, e);
+                    Err(ConnectError::new(ErrorCode::Internal, "Failed to fetch account data"))
                 }
             }
         }
@@ -341,14 +733,17 @@ impl ChainBridgeService for ChainBridgeGrpcService {
 
         info!("🔗 gRPC Received get_latest_blockhash");
         
-        match self.provider.get_latest_blockhash() {
+        match self.provider.get_latest_blockhash().await {
             Ok((blockhash, last_valid_block_height)) => {
                 let mut response = GetLatestBlockhashResponse::default();
                 response.blockhash = blockhash.to_string();
                 response.last_valid_block_height = last_valid_block_height;
                 Ok((response, ctx))
             }
-            Err(e) => Err(ConnectError::new(ErrorCode::Internal, e.to_string())),
+            Err(e) => {
+                error!("Solana RPC get_latest_blockhash error: {}", e);
+                Err(ConnectError::new(ErrorCode::Internal, "Failed to fetch blockhash"))
+            }
         }
     }
 
@@ -373,7 +768,7 @@ impl ChainBridgeService for ChainBridgeGrpcService {
             .map(|k| Pubkey::from_str(k).map_err(|e| ConnectError::new(ErrorCode::InvalidArgument, format!("Invalid account key '{}': {}", k, e))))
             .collect::<Result<Vec<_>, _>>()?;
 
-        match self.provider.get_recent_prioritization_fees(&account_keys) {
+        match self.provider.get_recent_prioritization_fees(&account_keys).await {
             Ok(fees) => {
                 let mut response = GetRecentPrioritizationFeesResponse::default();
                 response.fees = fees.into_iter().map(|f| {
@@ -384,7 +779,10 @@ impl ChainBridgeService for ChainBridgeGrpcService {
                 }).collect();
                 Ok((response, ctx))
             }
-            Err(e) => Err(ConnectError::new(ErrorCode::Internal, e.to_string())),
+            Err(e) => {
+                error!("Solana RPC get_recent_prioritization_fees error: {}", e);
+                Err(ConnectError::new(ErrorCode::Internal, "Failed to fetch prioritization fees"))
+            }
         }
     }
 
@@ -407,9 +805,9 @@ impl ChainBridgeService for ChainBridgeGrpcService {
         info!("🔗 gRPC Received get_token_account_balance for {}", request.pubkey);
         
         let pubkey = Pubkey::from_str(&request.pubkey)
-            .map_err(|e| ConnectError::new(ErrorCode::InvalidArgument, e.to_string()))?;
+            .map_err(|e| ConnectError::new(ErrorCode::InvalidArgument, format!("Invalid pubkey: {}", e)))?;
 
-        match self.provider.get_token_account_balance(&pubkey) {
+        match self.provider.get_token_account_balance(&pubkey).await {
             Ok(balance) => {
                 let mut response = GetTokenAccountBalanceResponse::default();
                 response.amount = balance["amount"].as_str().unwrap_or("0").to_string();
@@ -417,7 +815,10 @@ impl ChainBridgeService for ChainBridgeGrpcService {
                 response.ui_amount = balance["ui_amount"].as_f64().unwrap_or(0.0);
                 Ok((response, ctx))
             }
-            Err(e) => Err(ConnectError::new(ErrorCode::Internal, e.to_string())),
+            Err(e) => {
+                error!("Solana RPC get_token_account_balance error for {}: {}", request.pubkey, e);
+                Err(ConnectError::new(ErrorCode::Internal, "Failed to fetch token balance"))
+            }
         }
     }
 
@@ -440,9 +841,9 @@ impl ChainBridgeService for ChainBridgeGrpcService {
         info!("🔗 gRPC Received get_signature_status for {}", request.signature);
         
         let signature = Signature::from_str(&request.signature)
-            .map_err(|e: solana_sdk::signature::ParseSignatureError| ConnectError::new(ErrorCode::InvalidArgument, e.to_string()))?;
+            .map_err(|e: solana_sdk::signature::ParseSignatureError| ConnectError::new(ErrorCode::InvalidArgument, format!("Invalid signature: {}", e)))?;
 
-        match self.provider.get_signature_statuses(&[signature]) {
+        match self.provider.get_signature_statuses(&[signature]).await {
             Ok(resp) => {
                 if let Some(Some(status)) = resp.value.first() {
                     let mut response = GetSignatureStatusResponse::default();
@@ -457,7 +858,10 @@ impl ChainBridgeService for ChainBridgeGrpcService {
                     Ok((response, ctx))
                 }
             }
-            Err(e) => Err(ConnectError::new(ErrorCode::Internal, e.to_string())),
+            Err(e) => {
+                error!("Solana RPC get_signature_statuses error: {}", e);
+                Err(ConnectError::new(ErrorCode::Internal, "Failed to fetch signature status"))
+            }
         }
     }
 
@@ -478,15 +882,124 @@ impl ChainBridgeService for ChainBridgeGrpcService {
 
         info!("🔗 gRPC Received get_slot");
         
-        match self.provider.get_slot() {
+        match self.provider.get_slot().await {
             Ok(slot) => {
                 let mut response = GetSlotResponse::default();
                 response.slot = slot;
                 Ok((response, ctx))
             }
-            Err(e) => Err(ConnectError::new(ErrorCode::Internal, e.to_string())),
+            Err(e) => {
+                error!("Solana RPC get_slot error: {}", e);
+                Err(ConnectError::new(ErrorCode::Internal, "Failed to fetch current slot"))
+            }
         }
     }
+
+    async fn request_airdrop(
+        &self,
+        ctx: Context,
+        request: OwnedView<chain_v1::RequestAirdropRequestView<'static>>,
+    ) -> Result<(chain_v1::RequestAirdropResponse, Context), ConnectError> {
+        let role = self.extract_role(&ctx);
+        role.require_any(&[ServiceRole::Admin, ServiceRole::IamService])
+            .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
+
+        info!("🔗 gRPC Received request_airdrop for {} ({} lamports)", request.pubkey, request.lamports);
+        
+        let pubkey = Pubkey::from_str(&request.pubkey)
+            .map_err(|e| ConnectError::new(ErrorCode::InvalidArgument, format!("Invalid pubkey: {}", e)))?;
+
+        match self.provider.request_airdrop(&pubkey, request.lamports).await {
+            Ok(sig) => {
+                let mut response = chain_v1::RequestAirdropResponse::default();
+                response.success = true;
+                response.signature = sig.to_string();
+                Ok((response, ctx))
+            }
+            Err(e) => {
+                error!("Solana RPC request_airdrop error: {}", e);
+                Err(ConnectError::new(ErrorCode::Internal, "Airdrop request failed"))
+            }
+        }
+    }
+
+    async fn get_transaction_details(
+        &self,
+        ctx: Context,
+        request: OwnedView<chain_v1::GetTransactionDetailsRequestView<'static>>,
+    ) -> Result<(chain_v1::GetTransactionDetailsResponse, Context), ConnectError> {
+        let role = self.extract_role(&ctx);
+        role.require_any(&[
+            ServiceRole::ApiGateway, 
+            ServiceRole::TradingApi, 
+            ServiceRole::TradingMatcher, 
+            ServiceRole::OracleBridge, 
+            ServiceRole::IamService, 
+            ServiceRole::Admin
+        ])
+        .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
+
+        info!("🔗 gRPC Received get_transaction_details for {}", request.signature);
+        
+        let signature = Signature::from_str(&request.signature)
+            .map_err(|e| ConnectError::new(ErrorCode::InvalidArgument, format!("Invalid signature: {}", e)))?;
+
+        match self.provider.get_transaction(&signature).await {
+            Ok(tx_val) => {
+                let mut response = chain_v1::GetTransactionDetailsResponse::default();
+                response.found = true;
+                response.slot = tx_val["slot"].as_u64().unwrap_or(0);
+                // Extract account keys if possible
+                if let Some(accounts) = tx_val["transaction"]["message"]["accountKeys"].as_array() {
+                    response.account_keys = accounts.iter().map(|v| v.as_str().unwrap_or("").to_string()).collect();
+                }
+                Ok((response, ctx))
+            }
+            Err(e) => {
+                if e.to_string().contains("TransactionNotFound") || e.to_string().contains("not found") {
+                    let mut response = chain_v1::GetTransactionDetailsResponse::default();
+                    response.found = false;
+                    Ok((response, ctx))
+                } else {
+                    error!("Solana RPC get_transaction error: {}", e);
+                    Err(ConnectError::new(ErrorCode::Internal, "Failed to fetch transaction details"))
+                }
+            }
+        }
+    }
+
+    async fn get_epoch_info(
+        &self,
+        ctx: Context,
+        _request: OwnedView<chain_v1::GetEpochInfoRequestView<'static>>,
+    ) -> Result<(chain_v1::GetEpochInfoResponse, Context), ConnectError> {
+        let role = self.extract_role(&ctx);
+        role.require_any(&[
+            ServiceRole::ApiGateway,
+            ServiceRole::TradingApi,
+            ServiceRole::TradingMatcher,
+            ServiceRole::OracleBridge,
+            ServiceRole::IamService,
+            ServiceRole::Admin
+        ])
+        .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
+
+        info!("🔗 gRPC Received get_epoch_info");
+
+        match self.provider.get_epoch_info().await {
+            Ok(info) => {
+                let mut response = chain_v1::GetEpochInfoResponse::default();
+                response.epoch = info.epoch;
+                response.slot = info.absolute_slot;
+                Ok((response, ctx))
+            }
+            Err(e) => {
+                error!("Solana RPC get_epoch_info error: {}", e);
+                Err(ConnectError::new(ErrorCode::Internal, "Failed to fetch epoch info"))
+            }
+        }
+    }
+
 }
 
 #[cfg(test)]
@@ -498,12 +1011,11 @@ mod tests {
     use buffa::view::OwnedView;
     use connectrpc::{Context, ErrorCode};
 
-    struct MockSolanaProvider {
-    }
+    struct MockSolanaProvider;
 
     #[async_trait]
     impl SolanaProvider for MockSolanaProvider {
-        fn simulate_transaction(&self, _transaction: &Transaction) -> Result<Response<RpcSimulateTransactionResult>, ClientError> {
+        async fn simulate_transaction(&self, _transaction: &Transaction) -> Result<Response<RpcSimulateTransactionResult>, ClientError> {
             Ok(Response {
                 context: RpcResponseContext { slot: 100, api_version: None },
                 value: RpcSimulateTransactionResult {
@@ -518,16 +1030,16 @@ mod tests {
                 },
             })
         }
-        fn send_transaction(&self, _transaction: &Transaction) -> Result<Signature, ClientError> {
+        async fn send_transaction(&self, _transaction: &Transaction) -> Result<Signature, ClientError> {
             Ok(Signature::from([0u8; 64]))
         }
-        fn get_latest_blockhash(&self) -> Result<(Hash, u64), ClientError> {
+        async fn get_latest_blockhash(&self) -> Result<(Hash, u64), ClientError> {
             Ok((Hash::default(), 1000))
         }
-        fn get_balance(&self, _pubkey: &Pubkey) -> Result<u64, ClientError> {
+        async fn get_balance(&self, _pubkey: &Pubkey) -> Result<u64, ClientError> {
             Ok(1000000000) // 1 SOL
         }
-        fn get_account(&self, _pubkey: &Pubkey) -> Result<Account, ClientError> {
+        async fn get_account(&self, _pubkey: &Pubkey) -> Result<Account, ClientError> {
             Ok(Account {
                 lamports: 1000000000,
                 data: vec![1, 2, 3],
@@ -536,13 +1048,13 @@ mod tests {
                 rent_epoch: 0,
             })
         }
-        fn get_recent_prioritization_fees(&self, _pubkeys: &[Pubkey]) -> Result<Vec<RpcPrioritizationFee>, ClientError> {
+        async fn get_recent_prioritization_fees(&self, _pubkeys: &[Pubkey]) -> Result<Vec<RpcPrioritizationFee>, ClientError> {
             Ok(vec![RpcPrioritizationFee {
                 slot: 100,
                 prioritization_fee: 1000,
             }])
         }
-        fn get_token_account_balance(&self, _pubkey: &Pubkey) -> Result<serde_json::Value, ClientError> {
+        async fn get_token_account_balance(&self, _pubkey: &Pubkey) -> Result<serde_json::Value, ClientError> {
             Ok(serde_json::json!({
                 "ui_amount": 10.5,
                 "decimals": 9,
@@ -550,7 +1062,7 @@ mod tests {
                 "ui_amount_string": "10.5"
             }))
         }
-        fn get_signature_statuses(&self, _signatures: &[Signature]) -> Result<Response<Vec<Option<serde_json::Value>>>, ClientError> {
+        async fn get_signature_statuses(&self, _signatures: &[Signature]) -> Result<Response<Vec<Option<serde_json::Value>>>, ClientError> {
             Ok(Response {
                 context: RpcResponseContext { slot: 101, api_version: None },
                 value: vec![Some(serde_json::json!({
@@ -561,15 +1073,51 @@ mod tests {
                 }))],
             })
         }
-        fn get_slot(&self) -> Result<u64, ClientError> {
+        async fn get_slot(&self) -> Result<u64, ClientError> {
             Ok(100)
+        }
+        async fn request_airdrop(&self, _pubkey: &Pubkey, _lamports: u64) -> Result<Signature, ClientError> {
+            Ok(Signature::from([0u8; 64]))
+        }
+        async fn get_transaction(&self, _signature: &Signature) -> Result<serde_json::Value, ClientError> {
+            Ok(serde_json::json!({
+                "slot": 100,
+                "transaction": {
+                    "message": {
+                        "accountKeys": ["11111111111111111111111111111111"]
+                    }
+                }
+            }))
+        }
+        async fn get_epoch_info(&self) -> Result<solana_sdk::epoch_info::EpochInfo, ClientError> {
+            Ok(solana_sdk::epoch_info::EpochInfo {
+                absolute_slot: 100,
+                block_height: 100,
+                epoch: 1,
+                slots_in_epoch: 432000,
+                slot_index: 100,
+                transaction_count: Some(1000),
+            })
+        }
+    }
+
+    struct MockVaultProvider;
+
+    #[async_trait]
+    impl VaultProvider for MockVaultProvider {
+        async fn get_public_key(&self, _key_name: &str) -> anyhow::Result<Pubkey> {
+            Ok(Pubkey::default())
+        }
+        async fn sign_message(&self, _key_name: &str, _message: &[u8]) -> anyhow::Result<Signature> {
+            Ok(Signature::from([0u8; 64]))
         }
     }
 
     fn create_test_service() -> ChainBridgeGrpcService {
         ChainBridgeGrpcService {
             provider: Arc::new(MockSolanaProvider {}),
-            vault: Arc::new(crate::vault::VaultTransitClient::new("http://localhost:8200".to_string(), "root".to_string())),
+            vault: Arc::new(MockVaultProvider),
+            blockhash_cache: Arc::new(BlockhashCache::new()),
             transit_key_name: "test-key".to_string(),
         }
     }
@@ -657,5 +1205,29 @@ mod tests {
         let (resp, _) = service.get_account_data(authenticated_ctx(), request).await.unwrap();
         assert!(resp.exists);
         assert_eq!(resp.data, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_get_epoch_info() {
+        let service = create_test_service();
+        let request_owned = chain_v1::GetEpochInfoRequest::default();
+        let request = OwnedView::from_owned(&request_owned).unwrap();
+
+        let (resp, _) = service.get_epoch_info(authenticated_ctx(), request).await.unwrap();
+        assert_eq!(resp.epoch, 1);
+        assert_eq!(resp.slot, 100);
+    }
+
+    #[tokio::test]
+    async fn test_blockhash_cache() {
+        let cache = BlockhashCache::new();
+        assert!(cache.get().await.is_none());
+
+        let hash = Hash::new_unique();
+        cache.update(hash, 1000).await;
+        
+        let cached = cache.get().await.unwrap();
+        assert_eq!(cached.0, hash);
+        assert_eq!(cached.1, 1000);
     }
 }

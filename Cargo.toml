@@ -3,6 +3,15 @@ name = "gridtokenx-chain-bridge"
 version = "0.1.0"
 edition = "2024"
 description = "Decentralized signing authority and Solana blockchain interface"
+default-run = "gridtokenx-chain-bridge"
+
+[lib]
+name = "gridtokenx_chain_bridge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gridtokenx-chain-bridge"
+path = "src/main.rs"
 
 [dependencies]
 # Web Framework
@@ -17,9 +26,9 @@ async-trait = "0.1"
 
 # Solana SDK
 anchor-client = "1.0.0"
-solana-client = "2.1.0"
-solana-sdk = "2.1.0"
-solana-transaction-status = "2.1.0"
+solana-client = "2.3.1"
+solana-sdk = "2.3.1"
+solana-transaction-status = "2.3.1"
 solana-rpc-client-api = "2.3.1"
 solana-account-decoder = "2.3.1"
 solana-transaction-status-client-types = "2.3.1"
@@ -63,6 +72,12 @@ thiserror = "2.0"
 dotenvy = "0.15"
 dashmap = "6.1.0"
 tokio-retry = "0.3"
+litesvm = "0.10.0"
+solana-address = "2.6.0"
+solana-account = "3.4.0"
+solana-transaction = "3.1.0"
+solana-hash = "3.1.0"
+spl-token = "9.0.0"
 
 [build-dependencies]
 buffa-build = "0.2.0"

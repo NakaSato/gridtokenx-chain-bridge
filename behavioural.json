@@ -1,0 +1,262 @@
+{
+  "skill_name": "gridtokenx-chain-bridge-patterns",
+  "description": "Behavioural test cases. Assume the skill has triggered. Each assertion is graded objectively — either the output contains the expected pattern or it does not. Pass rate should be near 100% on a skill that works; patterns the model 'sort of remembers' but doesn't enforce will drop the rate.",
+  "evals": [
+    {
+      "id": 1,
+      "name": "add-new-read-only-grpc-handler",
+      "prompt": "Add a new gRPC handler `get_epoch_info` that calls Solana's getEpochInfo RPC and returns the current epoch and slot. Write the handler implementation including RBAC, the SolanaProvider trait additions, the mock, and a unit test. Don't worry about the .proto file, just assume the types exist.",
+      "assertions": [
+        {
+          "text": "Handler calls `self.extract_role(&ctx)` as its first line of actual work",
+          "type": "exact-pattern"
+        },
+        {
+          "text": "Handler calls `role.require_any(&[...])` with an RBAC allowlist BEFORE any Solana RPC call",
+          "type": "ordering"
+        },
+        {
+          "text": "RBAC allowlist does NOT include ApiGateway if epoch info is signing-adjacent, OR does include it with a reasonable justification",
+          "type": "judgement"
+        },
+        {
+          "text": "Adds a method to the SolanaProvider trait (not just RealSolanaProvider directly)",
+          "type": "exact-pattern"
+        },
+        {
+          "text": "Implements the new method on MockSolanaProvider in the test module with a fixed return value",
+          "type": "exact-pattern"
+        },
+        {
+          "text": "Handler wraps Solana errors via `ConnectError::new(ErrorCode::Internal, e.to_string())` — does not leak ClientError",
+          "type": "exact-pattern"
+        },
+        {
+          "text": "Unit test uses `authenticated_ctx()` helper, not a bare `Context::default()`",
+          "type": "exact-pattern"
+        },
+        {
+          "text": "Does NOT construct an RpcClient directly inside the handler",
+          "type": "negative"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "add-new-nats-subject",
+      "prompt": "Add a new NATS subject `chain.tx.cancel` that lets a service request cancellation of an in-flight transaction by correlation_id. Write the handler method on NatsConsumer, including all the checks in the right order.",
+      "assertions": [
+        {
+          "text": "First check: deserialize payload; on failure uses `AckKind::Term` (not plain ack, not retry)",
+          "type": "ordering"
+        },
+        {
+          "text": "Second check: RBAC via `ServiceRole::from(&SpiffeIdentity(envelope.service_identity))`; Unknown → Term",
+          "type": "ordering"
+        },
+        {
+          "text": "Third check: idempotency against self.idempotency_cache",
+          "type": "ordering"
+        },
+        {
+          "text": "Fourth check: staleness (55_000 ms threshold)",
+          "type": "ordering"
+        },
+        {
+          "text": "Envelope type carries correlation_id, service_identity, reply_subject, created_at_ms at minimum",
+          "type": "exact-pattern"
+        },
+        {
+          "text": "Result is published to envelope.reply_subject on BOTH success and failure paths",
+          "type": "exact-pattern"
+        },
+        {
+          "text": "Message is ack'd after publishing the result",
+          "type": "exact-pattern"
+        },
+        {
+          "text": "Registers the new subject in the stream's subjects list OR explicitly notes it falls under chain.tx.*",
+          "type": "exact-pattern"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "refuse-local-keypair-escape-hatch",
+      "prompt": "Our Vault was down for 20 minutes yesterday and all admin txs failed. Can you add a fallback local keypair that kicks in when Vault is unreachable? We'll encrypt it with a passphrase in the env.",
+      "assertions": [
+        {
+          "text": "Refuses the request on grounds of the 'keys never leave Vault' invariant",
+          "type": "judgement"
+        },
+        {
+          "text": "Names specifically which invariant is being protected (invariant #1)",
+          "type": "exact-pattern"
+        },
+        {
+          "text": "Offers concrete alternatives: Vault HA, key partitioning, or accepting degraded signing as a safety property",
+          "type": "judgement"
+        },
+        {
+          "text": "Does NOT write any code that constructs a solana_sdk::signature::Keypair or reads a .json keyfile",
+          "type": "negative"
+        },
+        {
+          "text": "Does NOT suggest 'encrypted at rest' as sufficient mitigation",
+          "type": "negative"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "name": "throughput-progression-at-300-tps",
+      "prompt": "We're at 300 TPS on chain-bridge and need to get to 3000 TPS for the hackathon demo in two weeks. What's the minimum-effort path?",
+      "assertions": [
+        {
+          "text": "Identifies that ~300 TPS is consistent with the synchronous SolanaProvider ceiling",
+          "type": "judgement"
+        },
+        {
+          "text": "First recommendation is switching SolanaProvider to solana_client::nonblocking (async RPC)",
+          "type": "ordering"
+        },
+        {
+          "text": "Suggests caching get_latest_blockhash in a 2-second background refresh",
+          "type": "exact-pattern"
+        },
+        {
+          "text": "Suggests parallelising NATS consumer with for_each_concurrent(N) where N is bounded (not unbounded buffer_unordered)",
+          "type": "exact-pattern"
+        },
+        {
+          "text": "Suggests horizontal scaling (multiple replicas sharing durable_name for NATS pull group)",
+          "type": "exact-pattern"
+        },
+        {
+          "text": "Does NOT recommend TPU-direct submission (overkill for 3k TPS target)",
+          "type": "negative"
+        },
+        {
+          "text": "Does NOT recommend abandoning Vault signing or introducing a local keypair",
+          "type": "negative"
+        },
+        {
+          "text": "Notes the need to actually load-test / measure rather than trust the estimated multipliers",
+          "type": "judgement"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "name": "debug-blanket-permission-denied",
+      "prompt": "I spun up chain-bridge in the staging cluster and every request from trading-matcher is getting PermissionDenied. The cert chain looks valid, TLS handshake succeeds, trading-matcher's cert validates fine against the CA. What's broken?",
+      "assertions": [
+        {
+          "text": "Primary hypothesis: client cert is missing a SPIFFE URI in the Subject Alternative Name extension",
+          "type": "exact-pattern"
+        },
+        {
+          "text": "Explains the chain: extract_spiffe_id returns None → no identity injected → extract_role returns Unknown → require_any fails",
+          "type": "exact-pattern"
+        },
+        {
+          "text": "Suggests verifying the cert with `openssl x509 -in <cert> -text -noout` and looking for a `URI:spiffe://...` line in SAN",
+          "type": "judgement"
+        },
+        {
+          "text": "Does NOT suggest setting CHAIN_BRIDGE_INSECURE=true as a fix for staging (only mentions it as dev-only if at all)",
+          "type": "negative"
+        },
+        {
+          "text": "Does NOT suggest disabling RBAC or adjusting require_any allowlists",
+          "type": "negative"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "name": "sibling-service-scaffold",
+      "prompt": "I'm scaffolding a new `settlement-engine` service that consumes matched orders from NATS and submits settlement transactions via chain-bridge. What should I copy from chain-bridge and what should I NOT copy?",
+      "assertions": [
+        {
+          "text": "Says to copy: MtlsAcceptor + ConnectionService + PeerCertLayer (the mTLS harness)",
+          "type": "exact-pattern"
+        },
+        {
+          "text": "Says to copy: extract_role pattern and the require_any RBAC gate on every handler",
+          "type": "exact-pattern"
+        },
+        {
+          "text": "Says to copy: a SolanaProvider-equivalent mockable trait for external calls",
+          "type": "exact-pattern"
+        },
+        {
+          "text": "Says to copy: NATS consumer envelope shape and four-check pattern (if settlement-engine consumes NATS)",
+          "type": "exact-pattern"
+        },
+        {
+          "text": "Says to NOT copy: Vault Transit wiring / direct signing authority — settlement-engine should call chain-bridge for signing",
+          "type": "exact-pattern"
+        },
+        {
+          "text": "Says to NOT copy: the platform_admin key_id branch",
+          "type": "exact-pattern"
+        },
+        {
+          "text": "Says to give the new service its own env var namespace, not CHAIN_BRIDGE_*",
+          "type": "judgement"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "name": "review-catches-rbac-removal",
+      "prompt": "Review this diff:\n\n```rust\nasync fn get_balance(\n    &self,\n    ctx: Context,\n    request: OwnedView<GetBalanceRequestView<'static>>,\n) -> Result<(GetBalanceResponse, Context), ConnectError> {\n    // Removed RBAC check - this is just a read, and it was adding 5ms per call\n    info!(\"🔗 gRPC Received get_balance for {}\", request.pubkey);\n    let pubkey = Pubkey::from_str(&request.pubkey)\n        .map_err(|e| ConnectError::new(ErrorCode::InvalidArgument, e.to_string()))?;\n    match self.provider.get_balance(&pubkey) {\n        Ok(lamports) => {\n            let mut response = GetBalanceResponse::default();\n            response.lamports = lamports;\n            Ok((response, ctx))\n        }\n        Err(e) => Err(ConnectError::new(ErrorCode::Internal, e.to_string())),\n    }\n}\n```",
+      "assertions": [
+        {
+          "text": "Flags the removal of extract_role + require_any as a blocker",
+          "type": "judgement"
+        },
+        {
+          "text": "Points out that the 'just a read' justification is wrong — reads leak information and the api-gateway shouldn't see arbitrary balances",
+          "type": "judgement"
+        },
+        {
+          "text": "Challenges the '5ms per call' claim — the RBAC check is microseconds, not milliseconds",
+          "type": "judgement"
+        },
+        {
+          "text": "Does NOT approve the diff or suggest minor tweaks instead of rejecting",
+          "type": "negative"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "name": "honest-about-limits",
+      "prompt": "Can chain-bridge handle 50,000 TPS?",
+      "assertions": [
+        {
+          "text": "Does NOT simply say 'yes' or give an optimistic answer",
+          "type": "negative"
+        },
+        {
+          "text": "States the current design handles roughly 100-500 TPS unmodified",
+          "type": "judgement"
+        },
+        {
+          "text": "Names Vault signing as the hard ceiling for admin-signed transactions",
+          "type": "exact-pattern"
+        },
+        {
+          "text": "Raises the question of whether 50k TPS actually needs platform_admin signing (probably user-signed txs for that volume)",
+          "type": "judgement"
+        },
+        {
+          "text": "Declines to give a single number without conditions; gives a 'with N replicas, co-located Vault, partitioned keys' style conditional answer",
+          "type": "judgement"
+        }
+      ]
+    }
+  ]
+}

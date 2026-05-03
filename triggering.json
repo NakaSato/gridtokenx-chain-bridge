@@ -1,0 +1,111 @@
+{
+  "skill_name": "gridtokenx-chain-bridge-patterns",
+  "description": "Triggering test cases. Positive cases should cause Claude to consult the skill; negative cases should NOT trigger it (testing for overtrigger). Each prompt is written as a real developer would phrase it in a GridTokenX repo context.",
+  "evals": [
+    {
+      "id": 1,
+      "category": "positive-core",
+      "prompt": "I'm adding a new RPC method `getEpochInfo` to the chain-bridge. It just forwards to Solana's getEpochInfo and returns the slot and epoch. Can you walk me through where to put it?",
+      "expected_behaviour": "Skill triggers. Claude should reference the SolanaProvider trait (add method, implement on Real + Mock), the handler shape on ChainBridgeGrpcService with extract_role + require_any, the proto regen step, and adding a unit test. Should pick an RBAC allowlist appropriate for a read-only RPC.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "category": "positive-core",
+      "prompt": "how do I add a new NATS subject chain.tx.cancel to the bridge?",
+      "expected_behaviour": "Skill triggers. Claude should name the four checks (deserialize→Term, RBAC via SpiffeIdentity, idempotency, staleness), the envelope shape (correlation_id, service_identity, reply_subject, created_at_ms), the retry policy rules, and the ack vs Term distinction.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "category": "positive-throughput",
+      "prompt": "We're load-testing chain-bridge and plateauing around 300 TPS. The PEA judges want us to demo 5k TPS. What's our progression path?",
+      "expected_behaviour": "Skill triggers on throughput terminology. Claude should identify that 300 TPS aligns with the synchronous SolanaProvider ceiling, then walk the numbered progression (switch to nonblocking RPC, cache blockhash, parallelise NATS consumer with for_each_concurrent, swap DashMap→moka, horizontal scale). Should also flag that Vault signing is the eventual ceiling and may force signing-authority partitioning.",
+      "files": []
+    },
+    {
+      "id": 4,
+      "category": "positive-throughput",
+      "prompt": "Our p99 is spiking from 80ms to 2 seconds under load. Logs look fine. Where should I look first?",
+      "expected_behaviour": "Skill triggers on latency/perf phrasing. Claude should suggest checking: Tokio worker starvation from sync SolanaProvider (most likely), per-message cleanup_cache O(n) scan, Vault signing serialization, missing connection reuse on client side, mTLS handshake cost if clients aren't multiplexing.",
+      "files": []
+    },
+    {
+      "id": 5,
+      "category": "positive-debugging",
+      "prompt": "Every gRPC call to chain-bridge returns PermissionDenied in local dev even though I generated fresh certs. What's wrong?",
+      "expected_behaviour": "Skill triggers. Claude should go straight to: client cert is likely missing a SPIFFE URI in the SAN extension, extract_spiffe_id returns None, so extract_role returns Unknown, so require_any fails. Should mention CHAIN_BRIDGE_INSECURE as a dev-only workaround while generating proper certs.",
+      "files": []
+    },
+    {
+      "id": 6,
+      "category": "positive-debugging",
+      "prompt": "getting 'Invalid signature length from Vault' errors when submitting transactions. vault is up and the key exists.",
+      "expected_behaviour": "Skill triggers. Claude should identify the likely cause: the Vault Transit key is not ed25519 (e.g. it's rsa-2048 or ecdsa-p256), so the returned signature isn't 64 bytes. Should suggest `vault read transit/keys/<name>` to verify type and recreating with `type=ed25519` if wrong.",
+      "files": []
+    },
+    {
+      "id": 7,
+      "category": "positive-architecture",
+      "prompt": "We're building a new oracle-bridge service that polls TMD weather APIs and pushes signed updates on-chain. Should I copy the chain-bridge structure?",
+      "expected_behaviour": "Skill triggers. Claude should point to the 'Building a sibling service' section: keep the mTLS harness (MtlsAcceptor + ConnectionService + PeerCertLayer), the extract_role pattern, and the SolanaProvider-equivalent mockable trait for external APIs. Should explicitly call out what NOT to copy: Vault Transit signing (oracle-bridge should call chain-bridge for signing, not sign directly) and the platform_admin branch.",
+      "files": []
+    },
+    {
+      "id": 8,
+      "category": "positive-security",
+      "prompt": "Can we just add a `trusted_client_ids` config so internal services skip the SPIFFE check for speed?",
+      "expected_behaviour": "Skill triggers. Claude should push back firmly: this violates invariant #2 (identity comes from mTLS, not client-settable config), creates a spoofing hole, and buys no measurable performance. Should note the check costs microseconds. Should mention CHAIN_BRIDGE_ALLOW_HEADER_AUTH exists but is dev-only and logs a loud warning.",
+      "files": []
+    },
+    {
+      "id": 9,
+      "category": "positive-subtle",
+      "prompt": "the trading-matcher is getting duplicate fills — it looks like some orders are matched twice. could be a chain-bridge issue?",
+      "expected_behaviour": "Skill triggers (debugging, adjacent system). Claude should mention the NATS idempotency cache in chain-bridge covers duplicate SUBMISSIONS of the same tx, not duplicate matches upstream. Should clarify the scope (idempotency is by correlation_id within 60s) and suggest the duplicate is probably in trading-matcher's own logic. Shows skill knows its scope.",
+      "files": []
+    },
+    {
+      "id": 10,
+      "category": "positive-subtle",
+      "prompt": "I want to keep a local fallback keypair in chain-bridge just for when Vault is down during incidents. How should I wire it?",
+      "expected_behaviour": "Skill triggers. Claude should refuse this cleanly on the basis of invariant #1 (keys never leave Vault). Should offer the real alternatives: Vault HA setup, signing-authority partitioning across multiple Vault keys for availability, or accepting that admin signing degrades during Vault outages as a deliberate safety property.",
+      "files": []
+    },
+    {
+      "id": 11,
+      "category": "negative-generic-solana",
+      "prompt": "How do I derive a PDA in Anchor?",
+      "expected_behaviour": "Skill should NOT trigger. This is generic Solana/Anchor knowledge unrelated to the chain-bridge, mTLS, NATS, Vault, or any of the patterns the skill covers. Overtriggering here would mean the description is too broad.",
+      "files": []
+    },
+    {
+      "id": 12,
+      "category": "negative-generic-rust",
+      "prompt": "What's the difference between Arc and Rc in Rust?",
+      "expected_behaviour": "Skill should NOT trigger. Generic Rust language question. Even if the skill uses Arc extensively, a language question doesn't need the skill.",
+      "files": []
+    },
+    {
+      "id": 13,
+      "category": "negative-unrelated-gridtokenx",
+      "prompt": "I'm designing the GRX tokenomics redemption curve. Should burns happen on-redemption or on-swap?",
+      "expected_behaviour": "Skill should NOT trigger. This is GridTokenX tokenomics work, not chain-bridge infrastructure work. Different problem domain entirely.",
+      "files": []
+    },
+    {
+      "id": 14,
+      "category": "negative-frontend",
+      "prompt": "I'm building the dashboard for prosumers to see their REC NFTs. Which React library do you recommend for the grid visualization?",
+      "expected_behaviour": "Skill should NOT trigger. Frontend concern, no overlap with the bridge.",
+      "files": []
+    },
+    {
+      "id": 15,
+      "category": "negative-adjacent-tempting",
+      "prompt": "What's SPIFFE and how does it differ from X.509?",
+      "expected_behaviour": "Skill should NOT trigger despite mentioning SPIFFE. This is a generic identity-standards question, not a GridTokenX implementation question. Claude should answer from general knowledge. A skill that fires here would be overtriggering on keyword match.",
+      "files": []
+    }
+  ]
+}

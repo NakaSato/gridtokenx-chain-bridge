@@ -14,6 +14,9 @@ use std::sync::Arc;
 #[derive(Clone, Debug)]
 pub struct VerifiedSpiffeUri(pub String);
 
+/// The PeerCertLayer is the standard GridTokenX way to propagate mTLS identity.
+/// It extracts the SPIFFE URI from the client certificate (injected by the acceptor)
+/// and makes it available via extensions and a synthetic header.
 #[derive(Clone)]
 pub struct PeerCertLayer {
 }
