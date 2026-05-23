@@ -1,60 +1,191 @@
-# Test cases for `gridtokenx-chain-bridge-patterns` skill
+# GridTokenX Chain Bridge
 
-Three layers of tests, each verifying something different.
+[![Rust](https://img.shields.io/badge/Rust-2024_Edition-orange.svg)](https://www.rust-lang.org/)
+[![Solana](https://img.shields.io/badge/Solana-2.3-blueviolet.svg)](https://solana.com)
+[![License](https://img.shields.io/badge/license-Proprietary-red.svg)](LICENSE)
 
-## (1) `evals/triggering.json` — does the skill activate on the right prompts?
+> **Decentralized Signing Authority and Solana Blockchain Interface** for the GridTokenX platform. All microservices route blockchain transactions through Chain Bridge for centralized key management via HashiCorp Vault Transit, SPIFFE/mTLS identity verification, and high-throughput transaction submission.
 
-Fifteen prompts split between **positive** (should trigger the skill) and **negative** (should NOT trigger — catches overtriggering). These are the skill-creator format eval cases: prompts only, no code, graded by whether Claude consults the skill when running the prompt.
+---
 
-Run with the skill-creator's evaluation harness (or manually — load the skill, send each prompt, observe whether Claude's response reflects material from the SKILL.md).
+## Architecture
 
-The ten positive cases span:
-- Core workflows (adding a gRPC handler, adding a NATS subject)
-- Throughput questions (TPS targets, latency spikes)
-- Debugging (PermissionDenied in staging, Vault signature length errors)
-- Architecture (scaffolding a sibling service)
-- Security judgement (refusing escape hatches)
-- Scope boundaries (duplicate order fills — adjacent but not in scope)
+Chain Bridge is the **single gateway** between GridTokenX backend services and the Solana blockchain. No service holds private keys — all signing is delegated to Vault Transit via Chain Bridge.
 
-The five negative cases test specifically against keyword-bait: "What's SPIFFE?" mentions a core term but is a generic question, not a GridTokenX one. A skill that fires on that is overtriggering.
+```
+                             ┌──────────────────────────┐
+                             │     HashiCorp Vault       │
+                             │   Transit Engine (Ed25519)│
+                             └────────────┬─────────────┘
+                                          │ sign / pubkey
+┌──────────────┐                          │
+│ IAM Service  │──┐                ┌──────▼──────────────┐
+├──────────────┤  │  ConnectRPC    │                      │
+│ Trading Svc  │──┼───(mTLS)──────▶│   Chain Bridge :5040 │
+├──────────────┤  │  + NATS        │                      │
+│ Oracle Bridge│──┘  JetStream     │  • RBAC (SPIFFE)     │         ┌───────────────┐
+├──────────────┤                   │  • Vault Signing     │────────▶│    Solana      │
+│ NATS         │──────────────────▶│  • Blockhash Cache   │  RPC    │   Blockchain   │
+│ JetStream    │  chain.tx.*       │  • Tx Simulation     │         └───────────────┘
+└──────────────┘                   └──────────────────────┘
+```
 
-## (2) `evals/behavioural.json` — does Claude follow the patterns when using the skill?
+### Dual Ingestion Paths
 
-Eight prompts with objective assertions. These assume the skill has triggered, and check whether the *response* conforms to the patterns the SKILL.md prescribes.
+| Path | Protocol | Use Case |
+|------|----------|----------|
+| **gRPC** (ConnectRPC) | Synchronous request/response | IAM, Trading, Oracle — real-time tx submission |
+| **NATS JetStream** | Async message queue | Batch settlement, retries, dead-letter queue (DLQ) |
 
-Assertion types used:
-- `exact-pattern` — the output must contain a specific textual or structural element (e.g. `extract_role` as the first line of handler work)
-- `ordering` — sequence matters (e.g. deserialize → RBAC → idempotency → staleness, in that order)
-- `negative` — the output must NOT contain something (e.g. must not produce a local keypair escape hatch)
-- `judgement` — requires a grader to evaluate (clear, objective criteria, but not a pure string match)
+---
 
-The test on the review-catches-rbac-removal case is the most important one: it verifies the skill makes Claude push back on a plausible-sounding "just remove the RBAC check for speed" diff, which is the exact failure mode the invariants section is designed to prevent.
+## Key Features
 
-Run with the skill-creator's graded eval workflow (`scripts.aggregate_benchmark`), or manually by running each prompt and scoring the assertions yourself.
+### Vault Transit Signing
+- **No local private keys** — all Ed25519 signing delegated to HashiCorp Vault Transit engine.
+- Public key caching with `DashMap` to avoid repeated Vault lookups.
+- Insecure dev mode (`CHAIN_BRIDGE_INSECURE=true`) with a hardcoded dev keypair for local development.
 
-## (3) `tests/rust/invariants.rs` — does the chain-bridge itself enforce what the skill says?
+### SPIFFE/mTLS Identity & RBAC
+- Extracts SPIFFE URIs from client X.509 certificates via mutual TLS.
+- Maps identities to `ServiceRole` (Admin, ApiGateway, TradingMatcher, OracleBridge, etc.).
+- Role-based access control enforced **before** any blockchain operation.
 
-A `#[tokio::test]` suite that exercises the invariants and throughput properties directly in Rust. Drop this into `crates/chain-bridge/tests/invariants.rs` and adjust the `use chain_bridge::*` imports to your crate name.
+### Blockhash Cache
+- Background task refreshes the latest blockhash every 2 seconds.
+- Eliminates per-transaction RPC calls for blockhash retrieval (Wall 1 mitigation).
 
-Five sections:
+### NATS JetStream Consumer
+- Pull-based consumer with 32-way concurrent message processing.
+- Subjects: `chain.tx.submit`, `chain.tx.simulate`, `chain.tx.cancel`.
+- DLQ monitoring on `chain.tx.dlq.*` for failed transactions.
+- Idempotency cache with automatic TTL cleanup (Wall 4 mitigation).
 
-- **§1 Invariants** — the four core invariants from the SKILL.md, encoded as runnable tests. The most important one (`unknown_spiffe_service_is_denied`) verifies that the RBAC gate runs *before* the provider, by asserting the provider's call count stays at zero when the role is Unknown. If someone removes `role.require_any(...)`, this test fails loudly.
+### Surfpool / LiteSVM Provider
+- In-memory Solana VM for simnet mode — deploys all 5 Anchor programs locally.
+- Lazy account cloning from mainnet RPC for realistic simulation.
 
-- **§2 RBAC** — service-by-service allowlist verification. api-gateway can read balances but cannot submit transactions. trading-matcher can do both. admin can do everything.
+---
 
-- **§3 NATS consumer** — four-check ordering tests (stale, duplicate, unknown identity, malformed). These are `#[ignore]`'d because they need a running NATS JetStream; run with a dev NATS server as documented in the file header.
+## gRPC Service Interface
 
-- **§4 Throughput** — `concurrent_reads_should_not_serialise` is the key test here. It fires 16 concurrent reads through a 50ms-latency mock provider on a 4-worker Tokio runtime. With the current synchronous `SolanaProvider` trait it will sometimes fail under CI load (this is intentional — it documents the problem). After migrating to `solana_client::nonblocking`, tighten the threshold to <200ms to lock in the improvement.
+Chain Bridge exposes a ConnectRPC service (`ChainBridgeService`) with 12 RPCs:
 
-- **§5 Vault integration** — `#[ignore]`'d, require a real dev-mode Vault. Verify pubkey caching works, 64-byte signature parsing works, and the "wrong key type" error mode from the skill produces a recognisable error string.
+| RPC Method | Description | RBAC |
+|------------|-------------|------|
+| `SimulateTransaction` | Dry-run a transaction | Read |
+| `SubmitTransaction` | Sign via Vault + submit to Solana | Write |
+| `GetBalance` | Query SOL balance | Read |
+| `GetAccountData` | Fetch raw account data | Read |
+| `GetLatestBlockhash` | Get latest blockhash (cached) | Read |
+| `GetRecentPrioritizationFees` | Query priority fee estimates | Read |
+| `GetTokenAccountBalance` | SPL token balance query | Read |
+| `GetSignatureStatus` | Check transaction confirmation | Read |
+| `GetSlot` | Current slot height | Read |
+| `RequestAirdrop` | Dev/testnet airdrop | Admin |
+| `GetTransactionDetails` | Full transaction details | Read |
+| `GetEpochInfo` | Epoch and slot information | Read |
 
-### How to run
+---
+
+## Source Structure
+
+```
+gridtokenx-chain-bridge/
+├── src/
+│   ├── main.rs              # Entry point — server bootstrap, Vault init, NATS setup
+│   ├── lib.rs               # Library re-exports
+│   ├── api.rs               # ChainBridgeGrpcService (12 RPCs, ~1600 lines)
+│   │                        #   ├── SolanaProvider trait (mockable)
+│   │                        #   ├── RealSolanaProvider (RpcClient)
+│   │                        #   ├── SurfpoolSolanaProvider (LiteSVM simnet)
+│   │                        #   ├── BlockhashCache
+│   │                        #   └── sign_and_submit() reusable signing logic
+│   ├── vault.rs             # VaultProvider trait + VaultTransitClient + InsecureKeypairProvider
+│   ├── middleware.rs         # PeerCertLayer — SPIFFE extraction from mTLS certificates
+│   ├── harness.rs           # MtlsAcceptor — custom TLS acceptor injecting peer certs
+│   └── nats_consumer.rs     # NatsConsumer — JetStream pull consumer (submit/simulate/cancel)
+├── tests/
+│   └── invariants.rs        # Invariant tests (RBAC, throughput, Vault integration)
+├── build.rs                 # Protobuf code generation (buffa + connectrpc)
+└── Cargo.toml               # Dependencies
+```
+
+---
+
+## Configuration
+
+### Environment Variables
 
 ```bash
-# Default suite (no infra required)
+# Server
+CHAIN_BRIDGE_GRPC_PORT=5040              # gRPC listen port (default: 5040)
+CHAIN_BRIDGE_INSECURE=true               # Dev mode — no TLS, admin RBAC bypass
+
+# Solana
+SOLANA_RPC_URL=http://localhost:8899     # Solana RPC endpoint
+SOLANA_NETWORK=localnet                  # localnet | devnet | simnet | mainnet
+SOLANA_COMMITMENT=confirmed              # confirmed | finalized | processed
+
+# Vault Transit (production)
+VAULT_ADDR=http://localhost:8200         # HashiCorp Vault address
+VAULT_TOKEN=root                         # Vault token
+CHAIN_BRIDGE_VAULT_KEY_NAME=gridtokenx-bridge  # Transit key name
+
+# mTLS Certificates (production)
+CHAIN_BRIDGE_TLS_CERT=infra/certs/server.crt
+CHAIN_BRIDGE_TLS_KEY=infra/certs/server.key
+CHAIN_BRIDGE_TLS_CA=infra/certs/ca.crt
+
+# NATS JetStream
+NATS_URL=nats://localhost:4222           # NATS server URL
+
+# Dev Escape Hatch
+CHAIN_BRIDGE_ALLOW_HEADER_AUTH=1         # Allow header-based auth (dev only)
+```
+
+---
+
+## Quick Start
+
+### Development (Insecure Mode)
+
+```bash
+# Start with local Solana validator
+CHAIN_BRIDGE_INSECURE=true \
+SOLANA_RPC_URL=http://localhost:8899 \
+cargo run
+
+# Or via the platform manager
+./scripts/app.sh start
+```
+
+### Production (mTLS + Vault)
+
+```bash
+# 1. Start Vault and configure Transit
+vault server -dev -dev-root-token-id=root &
+vault secrets enable transit
+vault write -f transit/keys/gridtokenx-bridge type=ed25519
+
+# 2. Start Chain Bridge with TLS
+VAULT_ADDR=http://127.0.0.1:8200 \
+VAULT_TOKEN=root \
+CHAIN_BRIDGE_TLS_CERT=infra/certs/server.crt \
+CHAIN_BRIDGE_TLS_KEY=infra/certs/server.key \
+CHAIN_BRIDGE_TLS_CA=infra/certs/ca.crt \
+cargo run --release
+```
+
+---
+
+## Testing
+
+```bash
+# Run invariant tests (no infrastructure required)
 cargo test --test invariants
 
-# With NATS and Vault available
+# Run with NATS + Vault available
 vault server -dev -dev-root-token-id=root &
 vault secrets enable transit
 vault write -f transit/keys/test-bridge-key type=ed25519
@@ -64,21 +195,38 @@ VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root \
   cargo test --test invariants -- --ignored --test-threads=1
 ```
 
-### What to add to `Cargo.toml`
+### Test Coverage
 
-```toml
-[dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "test-util"] }
-futures = "0.3"
-# (most other deps are already in the main [dependencies])
-```
+| Section | Tests | Infrastructure |
+|---------|-------|---------------|
+| **§1 Invariants** | RBAC gate runs before provider | None |
+| **§2 RBAC** | Per-service allowlist verification | None |
+| **§3 NATS** | Stale/duplicate/unknown/malformed checks | NATS JetStream |
+| **§4 Throughput** | 16 concurrent reads, <200ms target | None |
+| **§5 Vault** | Pubkey caching, signature parsing | Vault dev mode |
 
-## How these fit together
+---
 
-| If this breaks... | ...then |
-|---|---|
-| Triggering evals (1) fail | The SKILL.md description doesn't match real-world phrasing. Edit the description, not the skill body. |
-| Behavioural evals (2) fail | The SKILL.md body doesn't communicate the pattern clearly enough — Claude reads it and still gets it wrong. Edit the body, usually by adding concrete examples or moving the pattern higher in the doc. |
-| Rust tests (3) fail | The *code* drifted from what the skill documents. Either fix the code to match the skill, or update the skill if the drift was intentional and justified. |
+## Dependencies
 
-All three together give you a feedback loop: prompts that reliably trigger, responses that reliably follow the patterns, code that reliably enforces them at runtime.
+| Category | Crate | Purpose |
+|----------|-------|---------|
+| **Web** | `axum` 0.8, `tower`, `tower-http` | HTTP/gRPC server |
+| **gRPC** | `connectrpc` 0.2, `buffa` 0.2 | ConnectRPC protocol |
+| **Solana** | `solana-sdk` 2.3, `solana-client` 2.3, `anchor-client` 1.0 | Blockchain interaction |
+| **Async** | `tokio` 1.48, `futures` 0.3 | Multi-threaded runtime |
+| **Messaging** | `async-nats` 0.37 | NATS JetStream consumer |
+| **TLS** | `rustls` 0.23, `tokio-rustls` 0.26, `x509-parser` 0.16 | mTLS + SPIFFE |
+| **Vault** | `reqwest` 0.12 | Vault Transit HTTP API |
+| **Testing** | `litesvm` 0.10 | In-memory SVM for simnet |
+| **Shared** | `gridtokenx-blockchain-core` | Auth, RBAC, metrics |
+
+---
+
+## License
+
+Part of the GridTokenX Ecosystem — Proprietary
+
+---
+
+_Maintained by the GridTokenX Engineering Team._
