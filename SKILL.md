@@ -362,7 +362,6 @@ At 10k TPS you cannot debug by reading logs. You need:
 2. **In-flight gauges** — number of open gRPC streams, number of in-flight Vault calls, NATS consumer lag. These are leading indicators; latency is lagging.
 3. **Saturation signals** — Tokio runtime worker count vs. blocked-on-IO count (via `tokio-metrics`). When these converge you're about to tip over.
 4. **Per-caller breakdown** — tag metrics with the SPIFFE service name. "TPS is up" means nothing; "trading-matcher is doing 8k TPS and oracle-bridge is doing 2k TPS" is actionable.
-5. **Sampled tracing, not full tracing.** At 10k TPS full OpenTelemetry spans will cost you 10–30% throughput. Sample at 1% (`opentelemetry-sdk` `TraceIdRatioBased(0.01)`) and bump to 100% only when triaging.
 
 ### Load-test plan before you ship any of this
 
