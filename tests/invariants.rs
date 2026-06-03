@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use solana_client::{
@@ -11,7 +10,7 @@ use solana_sdk::{
     account::Account, hash::Hash, pubkey::Pubkey, signature::{Signature, Keypair, Signer}, transaction::Transaction, message::Message, instruction::Instruction
 };
 
-use gridtokenx_chain_bridge::api::{BlockhashCache, ChainBridgeCore, SolanaProvider};
+use gridtokenx_chain_bridge::api::{BlockhashCache, ChainBridgeGrpcService, SolanaProvider};
 use gridtokenx_chain_bridge::vault::VaultProvider;
 use gridtokenx_blockchain_core::auth::SpiffeIdentity;
 
@@ -100,15 +99,20 @@ fn create_mock_tx(program_id: Pubkey) -> Transaction {
     Transaction::new_unsigned(message)
 }
 
+// Hardcoded program IDs that match PolicyEngine's allowlist in gridtokenx-blockchain-core/src/policy.rs
+const TRADING_PROGRAM: &str = "DXxHdUar3pUUKRnt4XAMA8rdYRpAsNY1xk3Zo4crShvY";
+const REGISTRY_PROGRAM: &str = "HZR6b8GhzhDowyL6dX58qBjdSDNtFyJHU5dPF3kXDcTS";
+const ENERGY_TOKEN_PROGRAM: &str = "GjSjmPt8VSHr49ti4BijWZSu7rwb8o32pod7gNBnTY4U";
+const ORACLE_PROGRAM: &str = "AiWcoPDEk3G4iKrDXj1wCN1ffWxQDEsgtJZKcjauoFJr";
+
 #[tokio::test]
 async fn test_trading_service_can_submit_trading_tx() {
     let provider = Arc::new(MockSolanaProvider::new());
     let vault = Arc::new(MockVaultProvider);
     let cache = Arc::new(BlockhashCache::new());
-    let core = ChainBridgeCore::new(provider.clone(), vault, cache);
+    let core = ChainBridgeGrpcService::new(provider.clone(), vault, cache);
 
-    // Trading program ID
-    let trading_program_id = "DXxHdUar3pUUKRnt4XAMA8rdYRpAsNY1xk3Zo4crShvY".parse().unwrap();
+    let trading_program_id = TRADING_PROGRAM.parse().unwrap();
     let tx = create_mock_tx(trading_program_id);
     let serialized = bincode::serialize(&tx).unwrap();
 
@@ -124,10 +128,9 @@ async fn test_trading_service_cannot_submit_oracle_tx() {
     let provider = Arc::new(MockSolanaProvider::new());
     let vault = Arc::new(MockVaultProvider);
     let cache = Arc::new(BlockhashCache::new());
-    let core = ChainBridgeCore::new(provider.clone(), vault, cache);
+    let core = ChainBridgeGrpcService::new(provider.clone(), vault, cache);
 
-    // Oracle program ID
-    let oracle_program_id = "AiWcoPDEk3G4iKrDXj1wCN1ffWxQDEsgtJZKcjauoFJr".parse().unwrap();
+    let oracle_program_id = ORACLE_PROGRAM.parse().unwrap();
     let tx = create_mock_tx(oracle_program_id);
     let serialized = bincode::serialize(&tx).unwrap();
 
@@ -136,4 +139,183 @@ async fn test_trading_service_cannot_submit_oracle_tx() {
     let result = core.sign_and_submit(&serialized, "platform_admin", &identity).await;
     assert!(result.is_err(), "Trading matcher should NOT be able to submit oracle tx");
     assert_eq!(provider.send_count.load(Ordering::SeqCst), 0);
+}
+
+// ---------------------------------------------------------------
+// Expanded invariant test matrix
+// ---------------------------------------------------------------
+
+#[tokio::test]
+async fn test_oracle_service_can_submit_oracle_tx() {
+    let provider = Arc::new(MockSolanaProvider::new());
+    let vault = Arc::new(MockVaultProvider);
+    let cache = Arc::new(BlockhashCache::new());
+    let core = ChainBridgeGrpcService::new(provider.clone(), vault, cache);
+
+    let oracle_program_id = ORACLE_PROGRAM.parse().unwrap();
+    let tx = create_mock_tx(oracle_program_id);
+    let serialized = bincode::serialize(&tx).unwrap();
+
+    let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/oracle-bridge".to_string());
+
+    let result = core.sign_and_submit(&serialized, "platform_admin", &identity).await;
+    assert!(result.is_ok(), "Oracle Bridge should be able to submit oracle tx");
+    assert_eq!(provider.send_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_oracle_service_cannot_submit_trading_tx() {
+    let provider = Arc::new(MockSolanaProvider::new());
+    let vault = Arc::new(MockVaultProvider);
+    let cache = Arc::new(BlockhashCache::new());
+    let core = ChainBridgeGrpcService::new(provider.clone(), vault, cache);
+
+    let trading_program_id = TRADING_PROGRAM.parse().unwrap();
+    let tx = create_mock_tx(trading_program_id);
+    let serialized = bincode::serialize(&tx).unwrap();
+
+    let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/oracle-bridge".to_string());
+
+    let result = core.sign_and_submit(&serialized, "platform_admin", &identity).await;
+    assert!(result.is_err(), "Oracle Bridge should NOT be able to submit trading tx");
+    assert_eq!(provider.send_count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn test_iam_service_can_submit_registry_tx() {
+    let provider = Arc::new(MockSolanaProvider::new());
+    let vault = Arc::new(MockVaultProvider);
+    let cache = Arc::new(BlockhashCache::new());
+    let core = ChainBridgeGrpcService::new(provider.clone(), vault, cache);
+
+    let registry_program_id = REGISTRY_PROGRAM.parse().unwrap();
+    let tx = create_mock_tx(registry_program_id);
+    let serialized = bincode::serialize(&tx).unwrap();
+
+    let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/iam-service".to_string());
+
+    let result = core.sign_and_submit(&serialized, "platform_admin", &identity).await;
+    assert!(result.is_ok(), "IAM Service should be able to submit registry tx");
+    assert_eq!(provider.send_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_iam_service_cannot_submit_trading_tx() {
+    let provider = Arc::new(MockSolanaProvider::new());
+    let vault = Arc::new(MockVaultProvider);
+    let cache = Arc::new(BlockhashCache::new());
+    let core = ChainBridgeGrpcService::new(provider.clone(), vault, cache);
+
+    let trading_program_id = TRADING_PROGRAM.parse().unwrap();
+    let tx = create_mock_tx(trading_program_id);
+    let serialized = bincode::serialize(&tx).unwrap();
+
+    let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/iam-service".to_string());
+
+    let result = core.sign_and_submit(&serialized, "platform_admin", &identity).await;
+    assert!(result.is_err(), "IAM Service should NOT be able to submit trading tx");
+    assert_eq!(provider.send_count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn test_unknown_identity_rejected_entirely() {
+    let provider = Arc::new(MockSolanaProvider::new());
+    let vault = Arc::new(MockVaultProvider);
+    let cache = Arc::new(BlockhashCache::new());
+    let core = ChainBridgeGrpcService::new(provider.clone(), vault, cache);
+
+    // Even with the system program (always allowed in policy), unknown identity is rejected
+    let sys_program_id = "11111111111111111111111111111111".parse().unwrap();
+    let tx = create_mock_tx(sys_program_id);
+    let serialized = bincode::serialize(&tx).unwrap();
+
+    let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/unknown-service".to_string());
+
+    let result = core.sign_and_submit(&serialized, "platform_admin", &identity).await;
+    assert!(result.is_err(), "Unknown SPIFFE identity must be rejected entirely");
+    assert_eq!(provider.send_count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn test_admin_identity_can_submit_any_program_tx() {
+    let provider = Arc::new(MockSolanaProvider::new());
+    let vault = Arc::new(MockVaultProvider);
+    let cache = Arc::new(BlockhashCache::new());
+    let core = ChainBridgeGrpcService::new(provider.clone(), vault, cache);
+
+    // Admin can submit to ANY program — test with oracle (which is restricted for others)
+    let oracle_program_id = ORACLE_PROGRAM.parse().unwrap();
+    let tx = create_mock_tx(oracle_program_id);
+    let serialized = bincode::serialize(&tx).unwrap();
+
+    let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/admin/superuser".to_string());
+
+    let result = core.sign_and_submit(&serialized, "platform_admin", &identity).await;
+    assert!(result.is_ok(), "Admin should bypass all policy checks");
+    assert_eq!(provider.send_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_system_program_always_allowed() {
+    let provider = Arc::new(MockSolanaProvider::new());
+    let vault = Arc::new(MockVaultProvider);
+    let cache = Arc::new(BlockhashCache::new());
+    let core = ChainBridgeGrpcService::new(provider.clone(), vault, cache);
+
+    // System program is allowed for any known service identity
+    let sys_program_id: Pubkey = "11111111111111111111111111111111".parse().unwrap();
+    let tx = create_mock_tx(sys_program_id);
+    let serialized = bincode::serialize(&tx).unwrap();
+
+    // Oracle bridge should be able to call system program
+    let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/oracle-bridge".to_string());
+
+    let result = core.sign_and_submit(&serialized, "platform_admin", &identity).await;
+    assert!(result.is_ok(), "System program should be allowed for all known identities");
+    assert_eq!(provider.send_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_multi_instruction_tx_one_unauthorized_rejects_all() {
+    let provider = Arc::new(MockSolanaProvider::new());
+    let vault = Arc::new(MockVaultProvider);
+    let cache = Arc::new(BlockhashCache::new());
+    let core = ChainBridgeGrpcService::new(provider.clone(), vault, cache);
+
+    let trading_prog: Pubkey = TRADING_PROGRAM.parse().unwrap();
+    let oracle_prog: Pubkey = ORACLE_PROGRAM.parse().unwrap();
+    let payer = Keypair::new();
+
+    // Two instructions: trading (allowed for trading-service) + oracle (denied)
+    let ixs = vec![
+        Instruction::new_with_bytes(trading_prog, &[1], vec![]),
+        Instruction::new_with_bytes(oracle_prog, &[2], vec![]),
+    ];
+    let message = Message::new(&ixs, Some(&payer.pubkey()));
+    let tx = Transaction::new_unsigned(message);
+    let serialized = bincode::serialize(&tx).unwrap();
+
+    let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/trading-service".to_string());
+
+    let result = core.sign_and_submit(&serialized, "platform_admin", &identity).await;
+    assert!(result.is_err(), "Tx with any unauthorized instruction must be rejected");
+    assert_eq!(provider.send_count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn test_trading_service_can_call_energy_token_program() {
+    let provider = Arc::new(MockSolanaProvider::new());
+    let vault = Arc::new(MockVaultProvider);
+    let cache = Arc::new(BlockhashCache::new());
+    let core = ChainBridgeGrpcService::new(provider.clone(), vault, cache);
+
+    let energy_prog: Pubkey = ENERGY_TOKEN_PROGRAM.parse().unwrap();
+    let tx = create_mock_tx(energy_prog);
+    let serialized = bincode::serialize(&tx).unwrap();
+
+    let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/trading-service/matcher".to_string());
+
+    let result = core.sign_and_submit(&serialized, "platform_admin", &identity).await;
+    assert!(result.is_ok(), "Trading service should be allowed to call Energy Token program");
+    assert_eq!(provider.send_count.load(Ordering::SeqCst), 1);
 }

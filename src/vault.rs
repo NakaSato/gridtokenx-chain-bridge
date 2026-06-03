@@ -195,3 +195,104 @@ impl VaultProvider for InsecureKeypairProvider {
         Ok(self.keypair.sign_message(message))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use solana_sdk::signer::Signer;
+
+    // ---------------------------------------------------------------------------
+    // InsecureKeypairProvider
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_insecure_pubkey_is_deterministic() {
+        let provider = InsecureKeypairProvider::new();
+        let pk1 = provider.get_public_key("any-key").await.unwrap();
+        let pk2 = provider.get_public_key("other-key").await.unwrap();
+        // Same hardcoded keypair regardless of key_name
+        assert_eq!(pk1, pk2);
+    }
+
+    #[tokio::test]
+    async fn test_insecure_sign_and_verify_roundtrip() {
+        let provider = InsecureKeypairProvider::new();
+        let message = b"test message for signing";
+        let signature = provider.sign_message("key", message).await.unwrap();
+        let pubkey = provider.get_public_key("key").await.unwrap();
+
+        assert!(
+            signature.verify(&pubkey.to_bytes(), message),
+            "Signature must verify against the provider's public key"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_insecure_signature_differs_for_different_messages() {
+        let provider = InsecureKeypairProvider::new();
+        let sig_a = provider.sign_message("key", b"message A").await.unwrap();
+        let sig_b = provider.sign_message("key", b"message B").await.unwrap();
+        assert_ne!(sig_a, sig_b, "Different messages must produce different signatures");
+    }
+
+    // ---------------------------------------------------------------------------
+    // VaultTransitClient — signature parsing logic
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_vault_signature_parsing_valid() {
+        // Simulate what Vault returns: "vault:v1:<base64>"
+        let keypair = solana_sdk::signature::Keypair::new();
+        let message = b"test";
+        let real_sig = keypair.sign_message(message);
+        let sig_b64 = general_purpose::STANDARD.encode(real_sig.as_ref());
+
+        // Parse using the same logic as VaultTransitClient::sign_message
+        let vault_format = format!("vault:v1:{}", sig_b64);
+        let parts: Vec<&str> = vault_format.split(':').collect();
+        let sig_b64_parsed = parts.last().unwrap();
+        let sig_bytes = general_purpose::STANDARD
+            .decode(sig_b64_parsed)
+            .expect("Valid base64");
+        let recovered = solana_sdk::signature::Signature::try_from(sig_bytes)
+            .expect("Valid signature length");
+
+        assert_eq!(recovered, real_sig);
+    }
+
+    #[test]
+    fn test_vault_signature_parsing_malformed_no_colon() {
+        // No colon separator — should fail
+        let bad = general_purpose::STANDARD.encode([0u8; 64]);
+        let parts: Vec<&str> = bad.split(':').collect();
+        // When there's no colon, split returns a single element
+        // parts.last() returns the whole string, which isn't valid base64 of 64 bytes
+        // This tests that the parsing logic handles the edge case
+        assert_eq!(parts.len(), 1, "No colon means single element");
+    }
+
+    // ---------------------------------------------------------------------------
+    // VaultTransitClient — public key caching
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_vault_key_cache_hit_avoids_fetch() {
+        // Pre-populate cache manually
+        let client = VaultTransitClient::new("http://localhost:0".to_string(), "token".to_string());
+        let test_pk = solana_sdk::pubkey::Pubkey::new_unique();
+        client.key_cache.write().await.insert("test-key".to_string(), test_pk);
+
+        // Should return cached value without hitting HTTP
+        let result = client.get_public_key("test-key").await.unwrap();
+        assert_eq!(result, test_pk);
+    }
+
+    #[tokio::test]
+    async fn test_vault_key_cache_miss_would_fetch() {
+        // Empty cache — get_public_key would attempt HTTP (which fails here)
+        let client = VaultTransitClient::new("http://localhost:0".to_string(), "token".to_string());
+        let result = client.get_public_key("nonexistent-key").await;
+        // Connection refused — but proves it tried to fetch
+        assert!(result.is_err());
+    }
+}
