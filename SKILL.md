@@ -397,7 +397,22 @@ Steps 1–5 typically get you to 2–5k TPS. 6–8 get you past 10k. Past step 5
 
 ---
 
+## AI Agent Memory System Patterns
 
+We have introduced a multi-layered AI Agent memory framework ([agent_memory.rs](file:///Users/chanthawat/Developments/gridtokenx-coresystem/gridtokenx-chain-bridge/src/agent_memory.rs)) designed to provide structured cognitive layers for agents processing transactions or executing tasks within the GridTokenX bridge ecosystem.
+
+### 1. Core Invariants & Rules
+*   **Thread Safety First:** All layers (Short-Term, Long-Term, Episodic) must be wrapped in thread-safe locks (`Arc<RwLock<T>>`) to support concurrent read/write access from multi-threaded Tokio runtime tasks.
+*   **Bounded Context Window:** Short-term memory must enforce a strict capacity ceiling (`max_messages`). Do not let active dialog buffers grow indefinitely. Trigger `consolidate()` when limits are met to digest and move older turns into semantic long-term memory.
+*   **Decoupled Vector Search:** Never couple the long-term memory layer to a specific third-party provider or cloud database. Always interact through the `EmbeddingProvider` trait.
+*   **Offline Testability:** All unit/integration tests must use `LocalEmbeddingProvider` (deterministic hash-based vector mapping) to ensure builds are fast, offline-capable, and do not fail due to missing API keys.
+
+### 2. Design Patterns for Memory Integration
+*   **Auto-Consolidation:** Always specify a retention window when flushing. For example, if max capacity is 10, keep the 2 most recent messages when consolidating, converting the remaining 8 into a semantic summary.
+*   **Recency/Access Weighting:** Long-term vector searches query entries semantically using cosine similarity. Always trigger `touch_entry` upon retrieval to log statistics (`access_count` and `last_accessed_at_ms`).
+*   **Structured Trace Logging:** Use the `EpisodicMemory` layer to record precise tool names, arguments, results, and outcome success/rewards for learning or auditing agent actions.
+
+---
 
 Update this file when:
 
@@ -407,5 +422,6 @@ Update this file when:
 - The Vault Transit key rotation story is formalised.
 - A new `ServiceRole` variant is added.
 - The throughput target changes, or a new wall is discovered during load testing (update the "Honest baselines" table with measured numbers, replacing the rough estimates).
+- The AI Agent memory system invariants or structure changes.
 
 Keep the chain-bridge's actual source as the source of truth for the *code*; this skill is the source of truth for the *intent* and the *gotchas*.
