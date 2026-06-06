@@ -123,6 +123,70 @@ impl NatsConsumer {
         Ok(())
     }
 
+    /// Effect-level dedup decision for the stable `idempotency_key`.
+    ///
+    /// Returns `Some(result)` when the caller must **short-circuit** — replay a
+    /// prior `Done` (`success: true`, `deduplicated: true`) or reject an
+    /// `InFlight` collision without submitting a second on-chain tx; the caller
+    /// publishes the message, acks, and stops. Returns `None` to **proceed**
+    /// with signing.
+    ///
+    /// Side effect on the proceed path: an absent or expired key is claimed
+    /// `InFlight` (TTL 120s). A `None`/empty key is unprotected — returns `None`
+    /// and leaves the store untouched. Pure w.r.t. NATS IO so it is unit-tested
+    /// directly against a bare store (`handle_submit` can't be — its
+    /// `async_nats::Message` has no test constructor).
+    fn claim_or_replay(
+        dedup_store: &DashMap<String, DedupRecord>,
+        dedup_key: Option<&str>,
+        correlation_id: &str,
+        now_ms: u64,
+    ) -> Option<TxResultMessage> {
+        let key = dedup_key?;
+        use dashmap::mapref::entry::Entry;
+        match dedup_store.entry(key.to_string()) {
+            // Existing, unexpired record: replay instead of submitting again.
+            Entry::Occupied(e) if e.get().expiry_ms > now_ms => {
+                let rec = e.get().clone();
+                let result_msg = match rec.state {
+                    DedupState::Done { signature, slot } => {
+                        info!("♻️ Dedup hit (done) for idempotency_key {}: replaying prior result", key);
+                        TxResultMessage {
+                            correlation_id: correlation_id.to_string(),
+                            success: true,
+                            signature,
+                            error: None,
+                            slot,
+                            deduplicated: true,
+                        }
+                    }
+                    DedupState::InFlight => {
+                        // A concurrent attempt is mid-submit. Do NOT submit a
+                        // second on-chain tx; tell the caller it is in flight.
+                        warn!("♻️ Dedup hit (in-flight) for idempotency_key {}: concurrent submit in progress", key);
+                        TxResultMessage {
+                            correlation_id: correlation_id.to_string(),
+                            success: false,
+                            signature: None,
+                            error: Some("Submit already in flight for this idempotency_key".to_string()),
+                            slot: 0,
+                            deduplicated: true,
+                        }
+                    }
+                };
+                Some(result_msg)
+            }
+            // No record (or an expired one): claim it InFlight and proceed.
+            entry => {
+                entry.insert(DedupRecord {
+                    expiry_ms: now_ms + 120_000,
+                    state: DedupState::InFlight,
+                });
+                None
+            }
+        }
+    }
+
     async fn handle_submit(&self, msg: async_nats::jetstream::Message) {
         let start_time = std::time::Instant::now();
         let envelope: TxSubmitMessage = match serde_json::from_slice(&msg.payload) {
@@ -221,51 +285,13 @@ impl NatsConsumer {
         // 4.5 Effect-level dedup on the stable idempotency_key. Empty key =
         // legacy/unprotected caller -> skip (submit normally, no dedup).
         let dedup_key = (!envelope.idempotency_key.is_empty()).then(|| envelope.idempotency_key.clone());
-        if let Some(key) = &dedup_key {
-            use dashmap::mapref::entry::Entry;
-            match self.dedup_store.entry(key.clone()) {
-                // Existing, unexpired record: replay instead of submitting again.
-                Entry::Occupied(e) if e.get().expiry_ms > now_ms => {
-                    let rec = e.get().clone();
-                    let result_msg = match rec.state {
-                        DedupState::Done { signature, slot } => {
-                            info!("♻️ Dedup hit (done) for idempotency_key {}: replaying prior result", key);
-                            TxResultMessage {
-                                correlation_id: envelope.correlation_id,
-                                success: true,
-                                signature,
-                                error: None,
-                                slot,
-                                deduplicated: true,
-                            }
-                        }
-                        DedupState::InFlight => {
-                            // A concurrent attempt is mid-submit. Do NOT submit a
-                            // second on-chain tx; tell the caller it is in flight.
-                            warn!("♻️ Dedup hit (in-flight) for idempotency_key {}: concurrent submit in progress", key);
-                            TxResultMessage {
-                                correlation_id: envelope.correlation_id,
-                                success: false,
-                                signature: None,
-                                error: Some("Submit already in flight for this idempotency_key".to_string()),
-                                slot: 0,
-                                deduplicated: true,
-                            }
-                        }
-                    };
-                    self.metrics.track_operation("nats_submit_deduplicated", 0.0, result_msg.success);
-                    self.publish_result(&envelope.reply_subject, result_msg).await;
-                    let _ = msg.ack().await;
-                    return;
-                }
-                // No record (or an expired one): claim it InFlight and proceed.
-                entry => {
-                    entry.insert(DedupRecord {
-                        expiry_ms: now_ms + 120_000,
-                        state: DedupState::InFlight,
-                    });
-                }
-            }
+        if let Some(result_msg) =
+            Self::claim_or_replay(&self.dedup_store, dedup_key.as_deref(), &envelope.correlation_id, now_ms)
+        {
+            self.metrics.track_operation("nats_submit_deduplicated", 0.0, result_msg.success);
+            self.publish_result(&envelope.reply_subject, result_msg).await;
+            let _ = msg.ack().await;
+            return;
         }
 
         // 5. Sign and submit with retry policy for transient errors only
@@ -573,21 +599,38 @@ mod tests {
             .as_millis() as u64
     }
 
-    #[test]
-    fn test_empty_idempotency_key_skips_dedup() {
-        // The handler computes `dedup_key` as None when the key is empty —
-        // legacy/unprotected callers submit normally without a dedup claim.
-        let empty = String::new();
-        let dedup_key = (!empty.is_empty()).then(|| empty.clone());
-        assert!(dedup_key.is_none());
+    // These exercise the real decision fn `NatsConsumer::claim_or_replay` — the
+    // exact logic `handle_submit` runs at step 4.5 — not a hand-rolled
+    // simulation of it. `handle_submit` itself is untestable in-process (its
+    // `async_nats::Message` has no public constructor); extracting the pure
+    // decision lets the production code path be asserted directly.
 
-        let present = "settle:order-42".to_string();
-        let dedup_key = (!present.is_empty()).then(|| present.clone());
-        assert_eq!(dedup_key.as_deref(), Some("settle:order-42"));
+    fn inflight(now: u64) -> DedupRecord {
+        DedupRecord { expiry_ms: now + 120_000, state: DedupState::InFlight }
     }
 
     #[test]
-    fn test_dedup_done_is_replayed() {
+    fn test_dedup_none_key_skips_and_leaves_store_untouched() {
+        // Empty/legacy key -> dedup_key is None -> proceed, no claim recorded.
+        let store: DashMap<String, DedupRecord> = DashMap::new();
+        let out = NatsConsumer::claim_or_replay(&store, None, "corr-1", now_ms());
+        assert!(out.is_none(), "no key must proceed (None)");
+        assert!(store.is_empty(), "no key must not write a claim");
+    }
+
+    #[test]
+    fn test_dedup_absent_key_claims_inflight_and_proceeds() {
+        let store: DashMap<String, DedupRecord> = DashMap::new();
+        let now = now_ms();
+        let out = NatsConsumer::claim_or_replay(&store, Some("settle:1"), "corr-1", now);
+        assert!(out.is_none(), "first sight of a key must proceed");
+        let rec = store.get("settle:1").expect("claim must be recorded");
+        assert!(matches!(rec.state, DedupState::InFlight), "must be claimed InFlight");
+        assert!(rec.expiry_ms > now, "claim must carry a future expiry");
+    }
+
+    #[test]
+    fn test_dedup_done_is_replayed_with_dedup_flag() {
         let store: DashMap<String, DedupRecord> = DashMap::new();
         let now = now_ms();
         store.insert(
@@ -598,37 +641,58 @@ mod tests {
             },
         );
 
-        let rec = store.get("mint:abc").expect("record present");
-        assert!(rec.expiry_ms > now, "unexpired");
-        match &rec.state {
-            DedupState::Done { signature, slot } => {
-                assert_eq!(signature.as_deref(), Some("SIG"));
-                assert_eq!(*slot, 9);
-            }
-            DedupState::InFlight => panic!("expected Done"),
-        }
+        let out = NatsConsumer::claim_or_replay(&store, Some("mint:abc"), "corr-2", now)
+            .expect("a Done record must short-circuit with a replay");
+        assert!(out.success, "replay of a Done effect is a success");
+        assert!(out.deduplicated, "replay must be flagged deduplicated");
+        assert_eq!(out.signature.as_deref(), Some("SIG"));
+        assert_eq!(out.slot, 9);
+        assert_eq!(out.correlation_id, "corr-2", "result carries THIS attempt's correlation_id");
+        // The stored effect is untouched — no second on-chain submit.
+        assert!(matches!(store.get("mint:abc").unwrap().state, DedupState::Done { .. }));
+    }
+
+    #[test]
+    fn test_dedup_inflight_collision_is_rejected_not_resubmitted() {
+        let store: DashMap<String, DedupRecord> = DashMap::new();
+        let now = now_ms();
+        store.insert("settle:1".to_string(), inflight(now));
+
+        let out = NatsConsumer::claim_or_replay(&store, Some("settle:1"), "corr-3", now)
+            .expect("an in-flight collision must short-circuit");
+        assert!(!out.success, "a concurrent submit must not report success");
+        assert!(out.deduplicated, "collision is a dedup hit");
+        assert!(out.signature.is_none());
+        assert!(
+            out.error.as_deref().unwrap_or_default().contains("already in flight"),
+            "error must name the in-flight collision, got: {:?}", out.error
+        );
     }
 
     #[test]
     fn test_dedup_inflight_then_failure_releases_claim() {
         let store: DashMap<String, DedupRecord> = DashMap::new();
         let now = now_ms();
-        // Claim InFlight.
-        store.insert(
-            "settle:1".to_string(),
-            DedupRecord { expiry_ms: now + 120_000, state: DedupState::InFlight },
-        );
+
+        // First attempt claims InFlight and proceeds.
+        assert!(NatsConsumer::claim_or_replay(&store, Some("settle:1"), "a", now).is_none());
         assert!(store.contains_key("settle:1"));
 
-        // On submit failure the handler removes the claim so a retry can run.
+        // handle_submit removes the claim on submit failure so a retry can run.
         store.remove("settle:1");
-        assert!(!store.contains_key("settle:1"), "failure must release the claim");
+
+        // The retry sees no claim and proceeds again (re-claims InFlight).
+        assert!(
+            NatsConsumer::claim_or_replay(&store, Some("settle:1"), "b", now_ms()).is_none(),
+            "after a released claim a genuine retry must proceed"
+        );
+        assert!(matches!(store.get("settle:1").unwrap().state, DedupState::InFlight));
     }
 
     #[test]
     fn test_dedup_expired_record_treated_as_absent() {
-        // The replay arm guards on `expiry_ms > now_ms`; an expired record falls
-        // through to the claim branch (re-submit allowed after the window).
+        // A record past its window must not be replayed — it falls through to the
+        // claim branch and the stale Done is overwritten with a fresh InFlight.
         let store: DashMap<String, DedupRecord> = DashMap::new();
         let now = now_ms();
         store.insert(
@@ -638,8 +702,13 @@ mod tests {
                 state: DedupState::Done { signature: Some("OLD".to_string()), slot: 1 },
             },
         );
-        let expired = store.get("settle:old").map(|r| r.expiry_ms <= now).unwrap_or(false);
-        assert!(expired, "record past its window must not be replayed");
+
+        let out = NatsConsumer::claim_or_replay(&store, Some("settle:old"), "corr-4", now);
+        assert!(out.is_none(), "an expired record must not replay — must proceed");
+        assert!(
+            matches!(store.get("settle:old").unwrap().state, DedupState::InFlight),
+            "expired Done must be overwritten by a fresh InFlight claim"
+        );
     }
 
     // -------------------------------------------------------------------
