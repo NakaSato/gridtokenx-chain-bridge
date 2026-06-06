@@ -118,7 +118,7 @@ async fn test_trading_service_can_submit_trading_tx() {
 
     let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/trading-service/matcher".to_string());
 
-    let result = core.sign_and_submit(&serialized, "platform_admin", &identity).await;
+    let result = core.sign_and_submit(&serialized, "platform_admin", &identity, "").await;
     assert!(result.is_ok(), "Trading matcher should be able to submit trading tx");
     assert_eq!(provider.send_count.load(Ordering::SeqCst), 1);
 }
@@ -136,7 +136,7 @@ async fn test_trading_service_cannot_submit_oracle_tx() {
 
     let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/trading-service".to_string());
     
-    let result = core.sign_and_submit(&serialized, "platform_admin", &identity).await;
+    let result = core.sign_and_submit(&serialized, "platform_admin", &identity, "").await;
     assert!(result.is_err(), "Trading matcher should NOT be able to submit oracle tx");
     assert_eq!(provider.send_count.load(Ordering::SeqCst), 0);
 }
@@ -158,7 +158,7 @@ async fn test_oracle_service_can_submit_oracle_tx() {
 
     let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/oracle-bridge".to_string());
 
-    let result = core.sign_and_submit(&serialized, "platform_admin", &identity).await;
+    let result = core.sign_and_submit(&serialized, "platform_admin", &identity, "").await;
     assert!(result.is_ok(), "Oracle Bridge should be able to submit oracle tx");
     assert_eq!(provider.send_count.load(Ordering::SeqCst), 1);
 }
@@ -176,7 +176,7 @@ async fn test_oracle_service_cannot_submit_trading_tx() {
 
     let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/oracle-bridge".to_string());
 
-    let result = core.sign_and_submit(&serialized, "platform_admin", &identity).await;
+    let result = core.sign_and_submit(&serialized, "platform_admin", &identity, "").await;
     assert!(result.is_err(), "Oracle Bridge should NOT be able to submit trading tx");
     assert_eq!(provider.send_count.load(Ordering::SeqCst), 0);
 }
@@ -194,7 +194,7 @@ async fn test_iam_service_can_submit_registry_tx() {
 
     let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/iam-service".to_string());
 
-    let result = core.sign_and_submit(&serialized, "platform_admin", &identity).await;
+    let result = core.sign_and_submit(&serialized, "platform_admin", &identity, "").await;
     assert!(result.is_ok(), "IAM Service should be able to submit registry tx");
     assert_eq!(provider.send_count.load(Ordering::SeqCst), 1);
 }
@@ -212,7 +212,7 @@ async fn test_iam_service_cannot_submit_trading_tx() {
 
     let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/iam-service".to_string());
 
-    let result = core.sign_and_submit(&serialized, "platform_admin", &identity).await;
+    let result = core.sign_and_submit(&serialized, "platform_admin", &identity, "").await;
     assert!(result.is_err(), "IAM Service should NOT be able to submit trading tx");
     assert_eq!(provider.send_count.load(Ordering::SeqCst), 0);
 }
@@ -231,7 +231,7 @@ async fn test_unknown_identity_rejected_entirely() {
 
     let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/unknown-service".to_string());
 
-    let result = core.sign_and_submit(&serialized, "platform_admin", &identity).await;
+    let result = core.sign_and_submit(&serialized, "platform_admin", &identity, "").await;
     assert!(result.is_err(), "Unknown SPIFFE identity must be rejected entirely");
     assert_eq!(provider.send_count.load(Ordering::SeqCst), 0);
 }
@@ -250,7 +250,7 @@ async fn test_admin_identity_can_submit_any_program_tx() {
 
     let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/admin/superuser".to_string());
 
-    let result = core.sign_and_submit(&serialized, "platform_admin", &identity).await;
+    let result = core.sign_and_submit(&serialized, "platform_admin", &identity, "").await;
     assert!(result.is_ok(), "Admin should bypass all policy checks");
     assert_eq!(provider.send_count.load(Ordering::SeqCst), 1);
 }
@@ -270,7 +270,7 @@ async fn test_system_program_always_allowed() {
     // Oracle bridge should be able to call system program
     let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/oracle-bridge".to_string());
 
-    let result = core.sign_and_submit(&serialized, "platform_admin", &identity).await;
+    let result = core.sign_and_submit(&serialized, "platform_admin", &identity, "").await;
     assert!(result.is_ok(), "System program should be allowed for all known identities");
     assert_eq!(provider.send_count.load(Ordering::SeqCst), 1);
 }
@@ -297,7 +297,7 @@ async fn test_multi_instruction_tx_one_unauthorized_rejects_all() {
 
     let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/trading-service".to_string());
 
-    let result = core.sign_and_submit(&serialized, "platform_admin", &identity).await;
+    let result = core.sign_and_submit(&serialized, "platform_admin", &identity, "").await;
     assert!(result.is_err(), "Tx with any unauthorized instruction must be rejected");
     assert_eq!(provider.send_count.load(Ordering::SeqCst), 0);
 }
@@ -315,7 +315,7 @@ async fn test_trading_service_can_call_energy_token_program() {
 
     let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/trading-service/matcher".to_string());
 
-    let result = core.sign_and_submit(&serialized, "platform_admin", &identity).await;
+    let result = core.sign_and_submit(&serialized, "platform_admin", &identity, "").await;
     assert!(result.is_ok(), "Trading service should be allowed to call Energy Token program");
     assert_eq!(provider.send_count.load(Ordering::SeqCst), 1);
 }

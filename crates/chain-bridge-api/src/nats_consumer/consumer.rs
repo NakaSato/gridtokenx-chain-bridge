@@ -258,7 +258,7 @@ impl NatsConsumer {
         // but since we are in handle_submit which takes &self, we are fine as long as sign_and_submit is async.
         let result: anyhow::Result<(Signature, u64)> = Retry::spawn(retry_strategy, || async {
             info!("🔄 Retrying sign_and_submit for {}", envelope.correlation_id);
-            self.signing_service.sign_and_submit(&envelope.serialized_tx, &envelope.key_id, &SpiffeIdentity(envelope.service_identity.clone())).await
+            self.signing_service.sign_and_submit(&envelope.serialized_tx, &envelope.key_id, &SpiffeIdentity(envelope.service_identity.clone()), &envelope.correlation_id).await
         }).await;
 
         let result_msg = match result {

@@ -411,7 +411,7 @@
         let serialized = bincode::serialize(&tx).unwrap();
 
         let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/trading-service/matcher".to_string());
-        let result = service.sign_and_submit(&serialized, "platform_admin", &identity).await;
+        let result = service.sign_and_submit(&serialized, "platform_admin", &identity, "").await;
 
         assert!(result.is_ok(), "sign_and_submit should succeed for valid trading identity + trading program");
         assert_eq!(provider.send_count.load(Ordering::SeqCst), 1);

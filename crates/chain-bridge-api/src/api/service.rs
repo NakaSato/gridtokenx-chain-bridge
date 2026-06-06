@@ -43,9 +43,11 @@ impl ChainBridgeGrpcService {
 
     /// Append one audit entry. Best-effort: a failed append is logged but does
     /// NOT fail the mediated effect (audit is observability, not a gate).
-    /// `correlation_id` is empty until NATS envelope-id threading lands.
+    /// `correlation_id` ties the entry to the originating NATS envelope; the
+    /// gRPC path has no envelope id and passes "".
     async fn record_audit(
         &self,
+        correlation_id: &str,
         identity: &gridtokenx_blockchain_core::auth::SpiffeIdentity,
         outcome: AuditOutcome,
     ) {
@@ -53,7 +55,7 @@ impl ChainBridgeGrpcService {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let entry = AuditEntry::new("", identity.0.clone(), "sign_and_submit", outcome, created_at_ms);
+        let entry = AuditEntry::new(correlation_id, identity.0.clone(), "sign_and_submit", outcome, created_at_ms);
         if let Err(e) = self.audit.append(entry).await {
             warn!("⚠️ audit append failed (effect still applied): {}", e);
         }
@@ -89,7 +91,7 @@ impl ChainBridgeGrpcService {
     }
 
     /// Reusable signing and submission logic for both gRPC and NATS
-    pub async fn sign_and_submit(&self, serialized_tx: &[u8], key_id: &str, identity: &gridtokenx_blockchain_core::auth::SpiffeIdentity) -> anyhow::Result<(Signature, u64)> {
+    pub async fn sign_and_submit(&self, serialized_tx: &[u8], key_id: &str, identity: &gridtokenx_blockchain_core::auth::SpiffeIdentity, correlation_id: &str) -> anyhow::Result<(Signature, u64)> {
         let mut transaction: Transaction = bincode::deserialize(serialized_tx)
             .map_err(|e| anyhow::anyhow!("Invalid transaction format: {}", e))?;
 
@@ -98,6 +100,7 @@ impl ChainBridgeGrpcService {
         {
             let reason = e.to_string();
             self.record_audit(
+                correlation_id,
                 identity,
                 AuditOutcome::Rejected { stage: "policy".to_string(), reason: reason.clone() },
             )
@@ -138,6 +141,7 @@ impl ChainBridgeGrpcService {
                         let reason = format!("pre-sign simulation failed: {:?}", sim.value.err);
                         warn!("🛑 {} — rejecting before Vault sign", reason);
                         self.record_audit(
+                            correlation_id,
                             identity,
                             AuditOutcome::Rejected {
                                 stage: "simulation".to_string(),
@@ -186,6 +190,7 @@ impl ChainBridgeGrpcService {
             info!("✅ Transaction signed remotely via Vault Transit for platform_admin. Signature: {}", signature);
         } else if !key_id.is_empty() {
             self.record_audit(
+                correlation_id,
                 identity,
                 AuditOutcome::Rejected {
                     stage: "auth".to_string(),
@@ -200,6 +205,7 @@ impl ChainBridgeGrpcService {
             Ok(s) => s,
             Err(e) => {
                 self.record_audit(
+                    correlation_id,
                     identity,
                     AuditOutcome::Rejected { stage: "submit".to_string(), reason: e.to_string() },
                 )
@@ -209,6 +215,7 @@ impl ChainBridgeGrpcService {
         };
 
         self.record_audit(
+            correlation_id,
             identity,
             AuditOutcome::Submitted { signature: sig.to_string(), slot: 0 },
         )
@@ -264,7 +271,8 @@ impl ChainBridgeService for ChainBridgeGrpcService {
             .unwrap_or("unknown");
         let identity = gridtokenx_blockchain_core::auth::SpiffeIdentity(identity_str.to_string());
 
-        let result = self.sign_and_submit(&request.serialized_transaction, &request.key_id, &identity).await;
+        // gRPC has no NATS envelope id; audit correlation_id is empty for this path.
+        let result = self.sign_and_submit(&request.serialized_transaction, &request.key_id, &identity, "").await;
 
         match result {
             Ok((sig, slot)) => {

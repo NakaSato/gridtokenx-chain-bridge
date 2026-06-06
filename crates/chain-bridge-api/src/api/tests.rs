@@ -311,7 +311,7 @@
         );
 
         // Should fallback to MockSolanaProvider which returns Hash::default()
-        let result = service.sign_and_submit(&serialized, "platform_admin", &identity).await;
+        let result = service.sign_and_submit(&serialized, "platform_admin", &identity, "").await;
         assert!(result.is_ok());
     }
 
@@ -336,7 +336,7 @@
             "spiffe://gridtokenx.th/prod/admin".to_string()
         );
 
-        let result = service.sign_and_submit(&serialized, "platform_admin", &identity).await;
+        let result = service.sign_and_submit(&serialized, "platform_admin", &identity, "").await;
         assert!(result.is_ok());
         // MockVaultProvider returns Signature::from([0u8; 64]) for slot 0
     }
@@ -361,7 +361,7 @@
             "spiffe://gridtokenx.th/prod/admin".to_string()
         );
 
-        let result = service.sign_and_submit(&serialized, "platform_admin", &identity).await;
+        let result = service.sign_and_submit(&serialized, "platform_admin", &identity, "").await;
         assert!(result.is_ok(), "Should succeed with non-empty blockhash");
 
         // Verify the mock received the transaction — the blockhash should NOT be the cached one
@@ -375,7 +375,7 @@
             "spiffe://gridtokenx.th/prod/admin".to_string()
         );
 
-        let result = service.sign_and_submit(&[0xFF, 0xFE, 0xFD], "platform_admin", &identity).await;
+        let result = service.sign_and_submit(&[0xFF, 0xFE, 0xFD], "platform_admin", &identity, "").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Invalid transaction format"));
     }
@@ -392,7 +392,7 @@
             "spiffe://gridtokenx.th/prod/admin".to_string()
         );
 
-        let result = service.sign_and_submit(&serialized, "rogue_key", &identity).await;
+        let result = service.sign_and_submit(&serialized, "rogue_key", &identity, "").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not authorized"));
     }
@@ -416,7 +416,7 @@
             "spiffe://gridtokenx.th/prod/trading-service/matcher".to_string()
         );
 
-        let result = service.sign_and_submit(&serialized, "platform_admin", &identity).await;
+        let result = service.sign_and_submit(&serialized, "platform_admin", &identity, "").await;
         assert!(result.is_err(), "Policy Engine should reject trading-service calling oracle program");
         assert!(result.unwrap_err().to_string().contains("Policy Engine"));
     }
@@ -439,7 +439,7 @@
         );
 
         assert_eq!(store.len().await, 0);
-        let result = service.sign_and_submit(&serialized, "platform_admin", &identity).await;
+        let result = service.sign_and_submit(&serialized, "platform_admin", &identity, "").await;
         assert!(result.is_ok());
         assert_eq!(store.len().await, 1, "successful submit must append one audit entry");
     }
@@ -462,7 +462,7 @@
             "spiffe://gridtokenx.th/prod/trading-service/matcher".to_string(),
         );
 
-        let result = service.sign_and_submit(&serialized, "platform_admin", &identity).await;
+        let result = service.sign_and_submit(&serialized, "platform_admin", &identity, "").await;
         assert!(result.is_err());
         assert_eq!(store.len().await, 1, "policy rejection must append one audit entry");
     }
@@ -488,7 +488,7 @@
             "spiffe://gridtokenx.th/prod/admin".to_string(),
         );
 
-        let result = service.sign_and_submit(&serialized, "platform_admin", &identity).await;
+        let result = service.sign_and_submit(&serialized, "platform_admin", &identity, "").await;
         assert!(result.is_err(), "failing pre-sign simulation must reject before signing");
         assert_eq!(store.len().await, 1, "simulation rejection must append one audit entry");
     }
@@ -508,7 +508,7 @@
         );
 
         // Empty key_id should not sign but should still send
-        let result = service.sign_and_submit(&serialized, "", &identity).await;
+        let result = service.sign_and_submit(&serialized, "", &identity, "").await;
         assert!(result.is_ok(), "Empty key_id should skip signing and send unsigned");
     }
 
