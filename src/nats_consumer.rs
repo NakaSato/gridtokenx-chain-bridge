@@ -10,17 +10,43 @@ use crate::api::ChainBridgeGrpcService;
 use solana_sdk::transaction::Transaction;
 use solana_sdk::signature::Signature;
 
+/// Effect-level dedup record keyed by `idempotency_key`. Distinct from
+/// `idempotency_cache` (which guards per-`correlation_id` JetStream redelivery
+/// and cancel bookkeeping). A successful submit is recorded `Done` and replayed
+/// to later re-sends; a failure releases the claim so a genuine retry can run.
+#[derive(Clone)]
+struct DedupRecord {
+    expiry_ms: u64,
+    state: DedupState,
+}
+
+#[derive(Clone)]
+enum DedupState {
+    /// Claimed by an attempt that is currently signing+submitting.
+    InFlight,
+    /// Completed successfully — the on-chain effect happened exactly once. The
+    /// stored result is replayed to any later re-send with the same key.
+    Done {
+        signature: Option<String>,
+        slot: u64,
+    },
+}
+
 pub struct NatsConsumer {
     jetstream: async_nats::jetstream::Context,
     signing_service: Arc<ChainBridgeGrpcService>,
     metrics: Arc<dyn BlockchainMetrics>,
     /// correlation_id -> expiry_timestamp (ms)
     idempotency_cache: DashMap<String, u64>,
+    /// idempotency_key -> dedup record (effect-level, replayable).
+    /// `Arc` so the background cleanup task shares the same map (a bare
+    /// `DashMap::clone()` deep-copies — see `idempotency_cache`).
+    dedup_store: Arc<DashMap<String, DedupRecord>>,
 }
 
 impl NatsConsumer {
     pub fn new(
-        jetstream: async_nats::jetstream::Context, 
+        jetstream: async_nats::jetstream::Context,
         signing_service: Arc<ChainBridgeGrpcService>,
         metrics: Arc<dyn BlockchainMetrics>,
     ) -> Self {
@@ -29,6 +55,7 @@ impl NatsConsumer {
             signing_service,
             metrics,
             idempotency_cache: DashMap::new(),
+            dedup_store: Arc::new(DashMap::new()),
         }
     }
 
@@ -53,6 +80,7 @@ impl NatsConsumer {
 
         // Background idempotency cleanup task (Wall 4 mitigation)
         let cleanup_cache = self.idempotency_cache.clone();
+        let cleanup_dedup = self.dedup_store.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             loop {
@@ -62,6 +90,7 @@ impl NatsConsumer {
                     .unwrap_or_default()
                     .as_millis() as u64;
                 cleanup_cache.retain(|_, &mut expiry| expiry > now_ms);
+                cleanup_dedup.retain(|_, rec| rec.expiry_ms > now_ms);
             }
         });
 
@@ -136,6 +165,7 @@ impl NatsConsumer {
                 signature: None,
                 error: Some("Stale transaction — blockhash may be expired".to_string()),
                 slot: 0,
+                deduplicated: false,
             }).await;
             msg.ack().await.ok();
             return;
@@ -153,6 +183,7 @@ impl NatsConsumer {
                     signature: None,
                     error: Some(format!("Invalid transaction format: {}", e)),
                     slot: 0,
+                    deduplicated: false,
                 }).await;
                 let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
                 return;
@@ -167,6 +198,7 @@ impl NatsConsumer {
                 signature: None,
                 error: Some(format!("Policy Engine rejection: {}", e)),
                 slot: 0,
+                deduplicated: false,
             }).await;
             let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
             return;
@@ -180,9 +212,60 @@ impl NatsConsumer {
                 signature: None,
                 error: Some(format!("Key ID not authorized: {}", envelope.key_id)),
                 slot: 0,
+                deduplicated: false,
             }).await;
             let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
             return;
+        }
+
+        // 4.5 Effect-level dedup on the stable idempotency_key. Empty key =
+        // legacy/unprotected caller -> skip (submit normally, no dedup).
+        let dedup_key = (!envelope.idempotency_key.is_empty()).then(|| envelope.idempotency_key.clone());
+        if let Some(key) = &dedup_key {
+            use dashmap::mapref::entry::Entry;
+            match self.dedup_store.entry(key.clone()) {
+                // Existing, unexpired record: replay instead of submitting again.
+                Entry::Occupied(e) if e.get().expiry_ms > now_ms => {
+                    let rec = e.get().clone();
+                    let result_msg = match rec.state {
+                        DedupState::Done { signature, slot } => {
+                            info!("♻️ Dedup hit (done) for idempotency_key {}: replaying prior result", key);
+                            TxResultMessage {
+                                correlation_id: envelope.correlation_id,
+                                success: true,
+                                signature,
+                                error: None,
+                                slot,
+                                deduplicated: true,
+                            }
+                        }
+                        DedupState::InFlight => {
+                            // A concurrent attempt is mid-submit. Do NOT submit a
+                            // second on-chain tx; tell the caller it is in flight.
+                            warn!("♻️ Dedup hit (in-flight) for idempotency_key {}: concurrent submit in progress", key);
+                            TxResultMessage {
+                                correlation_id: envelope.correlation_id,
+                                success: false,
+                                signature: None,
+                                error: Some("Submit already in flight for this idempotency_key".to_string()),
+                                slot: 0,
+                                deduplicated: true,
+                            }
+                        }
+                    };
+                    self.metrics.track_operation("nats_submit_deduplicated", 0.0, result_msg.success);
+                    self.publish_result(&envelope.reply_subject, result_msg).await;
+                    let _ = msg.ack().await;
+                    return;
+                }
+                // No record (or an expired one): claim it InFlight and proceed.
+                entry => {
+                    entry.insert(DedupRecord {
+                        expiry_ms: now_ms + 120_000,
+                        state: DedupState::InFlight,
+                    });
+                }
+            }
         }
 
         // 5. Sign and submit with retry policy for transient errors only
@@ -200,21 +283,42 @@ impl NatsConsumer {
             Ok((sig, slot)) => {
                 // Cache successful correlation_id for 60 seconds
                 self.idempotency_cache.insert(envelope.correlation_id.clone(), now_ms + 60_000);
-                
+
+                // Record the effect as Done so re-sends with this key replay it
+                // instead of submitting a second on-chain transaction.
+                if let Some(key) = &dedup_key {
+                    self.dedup_store.insert(key.clone(), DedupRecord {
+                        expiry_ms: now_ms + 120_000,
+                        state: DedupState::Done {
+                            signature: Some(sig.to_string()),
+                            slot,
+                        },
+                    });
+                }
+
                 TxResultMessage {
                     correlation_id: envelope.correlation_id,
                     success: true,
                     signature: Some(sig.to_string()),
                     error: None,
                     slot,
+                    deduplicated: false,
                 }
             },
-            Err(e) => TxResultMessage {
-                correlation_id: envelope.correlation_id,
-                success: false,
-                signature: None,
-                error: Some(format!("{:#}", e)),
-                slot: 0,
+            Err(e) => {
+                // Failure is not a completed effect — release the InFlight claim
+                // so a genuine retry with the same key can attempt again.
+                if let Some(key) = &dedup_key {
+                    self.dedup_store.remove(key);
+                }
+                TxResultMessage {
+                    correlation_id: envelope.correlation_id,
+                    success: false,
+                    signature: None,
+                    error: Some(format!("{:#}", e)),
+                    slot: 0,
+                    deduplicated: false,
+                }
             },
         };
 
@@ -459,6 +563,86 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
+    // Effect-level dedup store (idempotency_key) state machine
+    // -------------------------------------------------------------------
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    #[test]
+    fn test_empty_idempotency_key_skips_dedup() {
+        // The handler computes `dedup_key` as None when the key is empty —
+        // legacy/unprotected callers submit normally without a dedup claim.
+        let empty = String::new();
+        let dedup_key = (!empty.is_empty()).then(|| empty.clone());
+        assert!(dedup_key.is_none());
+
+        let present = "settle:order-42".to_string();
+        let dedup_key = (!present.is_empty()).then(|| present.clone());
+        assert_eq!(dedup_key.as_deref(), Some("settle:order-42"));
+    }
+
+    #[test]
+    fn test_dedup_done_is_replayed() {
+        let store: DashMap<String, DedupRecord> = DashMap::new();
+        let now = now_ms();
+        store.insert(
+            "mint:abc".to_string(),
+            DedupRecord {
+                expiry_ms: now + 120_000,
+                state: DedupState::Done { signature: Some("SIG".to_string()), slot: 9 },
+            },
+        );
+
+        let rec = store.get("mint:abc").expect("record present");
+        assert!(rec.expiry_ms > now, "unexpired");
+        match &rec.state {
+            DedupState::Done { signature, slot } => {
+                assert_eq!(signature.as_deref(), Some("SIG"));
+                assert_eq!(*slot, 9);
+            }
+            DedupState::InFlight => panic!("expected Done"),
+        }
+    }
+
+    #[test]
+    fn test_dedup_inflight_then_failure_releases_claim() {
+        let store: DashMap<String, DedupRecord> = DashMap::new();
+        let now = now_ms();
+        // Claim InFlight.
+        store.insert(
+            "settle:1".to_string(),
+            DedupRecord { expiry_ms: now + 120_000, state: DedupState::InFlight },
+        );
+        assert!(store.contains_key("settle:1"));
+
+        // On submit failure the handler removes the claim so a retry can run.
+        store.remove("settle:1");
+        assert!(!store.contains_key("settle:1"), "failure must release the claim");
+    }
+
+    #[test]
+    fn test_dedup_expired_record_treated_as_absent() {
+        // The replay arm guards on `expiry_ms > now_ms`; an expired record falls
+        // through to the claim branch (re-submit allowed after the window).
+        let store: DashMap<String, DedupRecord> = DashMap::new();
+        let now = now_ms();
+        store.insert(
+            "settle:old".to_string(),
+            DedupRecord {
+                expiry_ms: now - 1,
+                state: DedupState::Done { signature: Some("OLD".to_string()), slot: 1 },
+            },
+        );
+        let expired = store.get("settle:old").map(|r| r.expiry_ms <= now).unwrap_or(false);
+        assert!(expired, "record past its window must not be replayed");
+    }
+
+    // -------------------------------------------------------------------
     // RBAC checks on message identity
     // -------------------------------------------------------------------
 
@@ -557,6 +741,7 @@ mod tests {
 
         let submit_msg = TxSubmitMessage {
             correlation_id: "test-123".to_string(),
+            idempotency_key: String::new(),
             reply_subject: "chain.tx.result.test-123".to_string(),
             serialized_tx,
             key_id: "platform_admin".to_string(),
@@ -620,6 +805,7 @@ mod tests {
             signature: Some(Signature::from([1u8; 64]).to_string()),
             error: None,
             slot: 100,
+            deduplicated: false,
         };
 
         let json = serde_json::to_vec(&result_msg).unwrap();
