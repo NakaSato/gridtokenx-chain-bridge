@@ -24,8 +24,9 @@ Two ingress paths, one exit:
 
 ## Build & test
 
-Single-crate Cargo workspace, **edition 2024**. `cd` into this dir first — do **not** `cargo` from the
-superproject root.
+Multi-crate Cargo workspace (root = virtual manifest, `members = ["crates/*"]`), **edition 2024**. `cd` into
+this dir first — do **not** `cargo` from the superproject root. `cargo check`/`test`/`build` from here cover
+all member crates.
 
 ```bash
 cargo check
@@ -34,16 +35,28 @@ cargo test test_name -- --nocapture         # single test
 cargo build --release                       # profile: lto + panic=abort + strip
 ```
 
-**`build.rs` codegen depends on a sibling submodule**: it compiles
-`../gridtokenx-blockchain-core/proto/chain_bridge.proto` into both tonic and ConnectRPC outputs. If
-`gridtokenx-blockchain-core` is missing (un-inited submodule), the build fails before compiling any `src/`.
+**`build.rs` codegen depends on a sibling submodule**: `crates/chain-bridge-api/build.rs` compiles
+`../../../gridtokenx-blockchain-core/proto/chain_bridge.proto` into both tonic and ConnectRPC outputs. If
+`gridtokenx-blockchain-core` is missing (un-inited submodule), the build fails before compiling any source.
 The generated proto types are re-exported through `api::chain_v1`.
 
-## Module map (post god-file split)
+## Workspace layout (post crate split)
+
+The root `Cargo.toml` is a **virtual manifest** (no package) — `members = ["crates/*"]`. Build/run from the root;
+the target dir and bin name are unchanged (`cargo build --release --bin gridtokenx-chain-bridge`).
+
+| Crate | Role |
+| --- | --- |
+| `crates/chain-bridge-api` | the **binary + lib `gridtokenx_chain_bridge`** — all driving adapters (gRPC service, NATS consumer, mTLS server, wiring). Holds the live signing path. |
+| `crates/chain-bridge-core` | hexagonal **ports** + domain types (`AuditPort`, `SignerPort`, audit hash-chain, errors). |
+| `crates/chain-bridge-persistence` | **driven adapters** over the core ports (`PostgresAuditStore`, plus the not-yet-live `vault_signer`/`solana_client`/`litesvm_sim` forks). |
+| `crates/chain-bridge-protocol` | generated ConnectRPC bindings (orphan — `chain-bridge-api` still generates its own via `build.rs`; consolidate when the live path adopts it). |
+
+### `chain-bridge-api` module map (post god-file split)
 
 `src/lib.rs` exposes six modules. The `api` and `nats_consumer` mods were split out of former monolithic files;
 each `mod.rs` re-exports shared `use` imports that submodules pull in via `use super::*;` — keep that pattern when
-adding submodules.
+adding submodules. Paths below are under `crates/chain-bridge-api/src/`.
 
 | Path | Role |
 | --- | --- |
