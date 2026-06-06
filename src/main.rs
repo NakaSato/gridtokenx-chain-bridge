@@ -12,7 +12,7 @@ use gridtokenx_chain_bridge::nats_consumer;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider().install_default().expect("Failed to install rustls crypto provider");
-    tracing_subscriber::fmt::init();
+    let _telemetry_guard = gridtokenx_telemetry::init("gridtokenx-chain-bridge");
     info!("🚀 GridTokenX Chain Bridge Protocol v1.2 starting...");
 
     let insecure_mode = std::env::var("CHAIN_BRIDGE_INSECURE")
@@ -59,7 +59,30 @@ async fn main() -> anyhow::Result<()> {
         client
     };
 
-    let grpc_service = Arc::new(ChainBridgeGrpcService::new(provider, vault_provider, blockhash_cache));
+    // Audit hash-chain sink (Gap #2): Postgres when DATABASE_URL is set and
+    // reachable, else an in-memory fallback so the binary runs without a DB.
+    let audit: Arc<dyn chain_bridge_core::AuditPort> = match std::env::var("DATABASE_URL") {
+        Ok(url) if !url.is_empty() => {
+            match chain_bridge_persistence::PostgresAuditStore::connect(&url).await {
+                Ok(store) => {
+                    info!("📓 Audit trail → Postgres (hash-chained)");
+                    Arc::new(store)
+                }
+                Err(e) => {
+                    warn!("⚠️ Audit Postgres connect failed ({e}); falling back to in-memory audit");
+                    Arc::new(chain_bridge_persistence::InMemoryAuditStore::new())
+                }
+            }
+        }
+        _ => {
+            info!("📓 Audit trail → in-memory (DATABASE_URL unset)");
+            Arc::new(chain_bridge_persistence::InMemoryAuditStore::new())
+        }
+    };
+
+    let grpc_service = Arc::new(
+        ChainBridgeGrpcService::new(provider, vault_provider, blockhash_cache).with_audit(audit),
+    );
     
     let metrics = Arc::new(gridtokenx_blockchain_core::rpc::metrics::NoopMetrics);
 

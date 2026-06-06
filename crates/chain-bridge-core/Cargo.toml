@@ -1,0 +1,17 @@
+[package]
+name = "chain-bridge-core"
+version = "0.1.0"
+edition = "2024"
+description = "Ports (traits) and domain types for Chain Bridge. No framework or async-runtime deps."
+
+[lib]
+name = "chain_bridge_core"
+path = "src/lib.rs"
+
+[dependencies]
+# Solana domain types appear in port signatures (Pubkey/Signature/Transaction/Hash).
+solana-sdk = "2.3.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+async-trait = "0.1"

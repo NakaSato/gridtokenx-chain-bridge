@@ -1,16 +1,23 @@
 use super::*;
 use anyhow::Context as _;
+use chain_bridge_core::audit::{AuditEntry, AuditOutcome};
+use chain_bridge_core::AuditPort;
+use chain_bridge_persistence::InMemoryAuditStore;
 
 pub struct ChainBridgeGrpcService {
     pub(crate) provider: Arc<dyn SolanaProvider>,
     pub(crate) vault: Arc<dyn VaultProvider>,
     pub(crate) blockhash_cache: Arc<BlockhashCache>,
     pub(crate) transit_key_name: String,
+    /// Tamper-evident, hash-chained audit trail (Gap #2). Every signing
+    /// decision in `sign_and_submit` (policy/auth reject, submit) appends here.
+    /// Defaults to in-memory; `with_audit` swaps in the Postgres adapter.
+    pub(crate) audit: Arc<dyn AuditPort>,
 }
 
 impl ChainBridgeGrpcService {
     pub fn new(
-        provider: Arc<dyn SolanaProvider>, 
+        provider: Arc<dyn SolanaProvider>,
         vault: Arc<dyn VaultProvider>,
         blockhash_cache: Arc<BlockhashCache>,
     ) -> Self {
@@ -22,6 +29,33 @@ impl ChainBridgeGrpcService {
             vault,
             blockhash_cache,
             transit_key_name,
+            audit: Arc::new(InMemoryAuditStore::new()),
+        }
+    }
+
+    /// Replace the audit sink (e.g. the Postgres hash-chain store wired in
+    /// `main`). Builder-style so existing 3-arg `new` callers stay unchanged.
+    #[must_use]
+    pub fn with_audit(mut self, audit: Arc<dyn AuditPort>) -> Self {
+        self.audit = audit;
+        self
+    }
+
+    /// Append one audit entry. Best-effort: a failed append is logged but does
+    /// NOT fail the mediated effect (audit is observability, not a gate).
+    /// `correlation_id` is empty until NATS envelope-id threading lands.
+    async fn record_audit(
+        &self,
+        identity: &gridtokenx_blockchain_core::auth::SpiffeIdentity,
+        outcome: AuditOutcome,
+    ) {
+        let created_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let entry = AuditEntry::new("", identity.0.clone(), "sign_and_submit", outcome, created_at_ms);
+        if let Err(e) = self.audit.append(entry).await {
+            warn!("⚠️ audit append failed (effect still applied): {}", e);
         }
     }
 
@@ -59,8 +93,17 @@ impl ChainBridgeGrpcService {
         let mut transaction: Transaction = bincode::deserialize(serialized_tx)
             .map_err(|e| anyhow::anyhow!("Invalid transaction format: {}", e))?;
 
-        gridtokenx_blockchain_core::policy::PolicyEngine::validate_transaction(identity, &transaction)
-            .map_err(|e| anyhow::anyhow!("Policy Engine rejection: {}", e))?;
+        if let Err(e) =
+            gridtokenx_blockchain_core::policy::PolicyEngine::validate_transaction(identity, &transaction)
+        {
+            let reason = e.to_string();
+            self.record_audit(
+                identity,
+                AuditOutcome::Rejected { stage: "policy".to_string(), reason: reason.clone() },
+            )
+            .await;
+            return Err(anyhow::anyhow!("Policy Engine rejection: {}", reason));
+        }
 
         if key_id == "platform_admin" {
             // Only set blockhash if it's empty
@@ -77,6 +120,43 @@ impl ChainBridgeGrpcService {
                 };
                 
                 transaction.message.recent_blockhash = bh;
+            }
+
+            // 1b. Pre-sign simulation (Gap #3): reject a doomed transaction
+            // before spending a Vault signing operation. The tx is still
+            // unsigned here; the provider's simulate runs with sig_verify=false.
+            // A definitive tx-level failure rejects (audited stage="simulation");
+            // an RPC/infra error stays advisory so a simulation outage can't halt
+            // every write. Opt out via CHAIN_BRIDGE_PRESIGN_DISABLE for flows
+            // (e.g. some simnet paths) that can't meaningfully simulate.
+            let presign_disabled = std::env::var("CHAIN_BRIDGE_PRESIGN_DISABLE")
+                .map(|v| v.to_lowercase() == "true")
+                .unwrap_or(false);
+            if !presign_disabled {
+                match self.provider.simulate_transaction(&transaction).await {
+                    Ok(sim) if sim.value.err.is_some() => {
+                        let reason = format!("pre-sign simulation failed: {:?}", sim.value.err);
+                        warn!("🛑 {} — rejecting before Vault sign", reason);
+                        self.record_audit(
+                            identity,
+                            AuditOutcome::Rejected {
+                                stage: "simulation".to_string(),
+                                reason: reason.clone(),
+                            },
+                        )
+                        .await;
+                        return Err(anyhow::anyhow!(reason));
+                    }
+                    Ok(sim) => {
+                        info!(
+                            "✅ pre-sign simulation passed ({} compute units)",
+                            sim.value.units_consumed.unwrap_or(0)
+                        );
+                    }
+                    Err(e) => {
+                        warn!("⚠️ pre-sign simulation RPC error (advisory, proceeding): {}", e);
+                    }
+                }
             }
 
             // 2. Sign the message data, not the whole transaction
@@ -105,11 +185,34 @@ impl ChainBridgeGrpcService {
 
             info!("✅ Transaction signed remotely via Vault Transit for platform_admin. Signature: {}", signature);
         } else if !key_id.is_empty() {
-             return Err(anyhow::anyhow!("Key ID not authorized: {}", key_id));
+            self.record_audit(
+                identity,
+                AuditOutcome::Rejected {
+                    stage: "auth".to_string(),
+                    reason: format!("Key ID not authorized: {}", key_id),
+                },
+            )
+            .await;
+            return Err(anyhow::anyhow!("Key ID not authorized: {}", key_id));
         }
 
-        let sig = self.provider.send_transaction(&transaction).await
-            .map_err(|e| anyhow::anyhow!("Solana RPC submission failed: {}", e))?;
+        let sig = match self.provider.send_transaction(&transaction).await {
+            Ok(s) => s,
+            Err(e) => {
+                self.record_audit(
+                    identity,
+                    AuditOutcome::Rejected { stage: "submit".to_string(), reason: e.to_string() },
+                )
+                .await;
+                return Err(anyhow::anyhow!("Solana RPC submission failed: {}", e));
+            }
+        };
+
+        self.record_audit(
+            identity,
+            AuditOutcome::Submitted { signature: sig.to_string(), slot: 0 },
+        )
+        .await;
 
         Ok((sig, 0))
     }

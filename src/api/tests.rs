@@ -94,6 +94,41 @@
         }
     }
 
+    /// Provider whose pre-sign simulation always returns a tx-level error.
+    /// All other calls delegate to `MockSolanaProvider`. Used to prove
+    /// `sign_and_submit` rejects (and audits) before reaching the Vault sign.
+    struct FailingSimProvider(MockSolanaProvider);
+
+    #[async_trait]
+    impl SolanaProvider for FailingSimProvider {
+        async fn simulate_transaction(&self, _transaction: &Transaction) -> Result<Response<RpcSimulateTransactionResult>, ClientError> {
+            Ok(Response {
+                context: RpcResponseContext { slot: 100, api_version: None },
+                value: RpcSimulateTransactionResult {
+                    err: Some(solana_sdk::transaction::TransactionError::AccountNotFound),
+                    logs: Some(vec!["Program log: boom".to_string()]),
+                    accounts: None,
+                    units_consumed: Some(0),
+                    return_data: None,
+                    inner_instructions: None,
+                    loaded_accounts_data_size: None,
+                    replacement_blockhash: None,
+                },
+            })
+        }
+        async fn send_transaction(&self, tx: &Transaction) -> Result<Signature, ClientError> { self.0.send_transaction(tx).await }
+        async fn get_latest_blockhash(&self) -> Result<(Hash, u64), ClientError> { self.0.get_latest_blockhash().await }
+        async fn get_balance(&self, p: &Pubkey) -> Result<u64, ClientError> { self.0.get_balance(p).await }
+        async fn get_account(&self, p: &Pubkey) -> Result<Account, ClientError> { self.0.get_account(p).await }
+        async fn get_recent_prioritization_fees(&self, p: &[Pubkey]) -> Result<Vec<RpcPrioritizationFee>, ClientError> { self.0.get_recent_prioritization_fees(p).await }
+        async fn get_token_account_balance(&self, p: &Pubkey) -> Result<serde_json::Value, ClientError> { self.0.get_token_account_balance(p).await }
+        async fn get_signature_statuses(&self, s: &[Signature]) -> Result<Response<Vec<Option<serde_json::Value>>>, ClientError> { self.0.get_signature_statuses(s).await }
+        async fn get_slot(&self) -> Result<u64, ClientError> { self.0.get_slot().await }
+        async fn request_airdrop(&self, p: &Pubkey, l: u64) -> Result<Signature, ClientError> { self.0.request_airdrop(p, l).await }
+        async fn get_transaction(&self, s: &Signature) -> Result<serde_json::Value, ClientError> { self.0.get_transaction(s).await }
+        async fn get_epoch_info(&self) -> Result<solana_sdk::epoch_info::EpochInfo, ClientError> { self.0.get_epoch_info().await }
+    }
+
     struct MockVaultProvider;
 
     #[async_trait]
@@ -112,6 +147,7 @@
             vault: Arc::new(MockVaultProvider),
             blockhash_cache: Arc::new(BlockhashCache::new()),
             transit_key_name: "test-key".to_string(),
+            audit: Arc::new(chain_bridge_persistence::InMemoryAuditStore::new()),
         }
     }
 
@@ -383,6 +419,78 @@
         let result = service.sign_and_submit(&serialized, "platform_admin", &identity).await;
         assert!(result.is_err(), "Policy Engine should reject trading-service calling oracle program");
         assert!(result.unwrap_err().to_string().contains("Policy Engine"));
+    }
+
+    // ---------------------------------------------------------------
+    // Audit hash-chain (Gap #2) — sign_and_submit appends entries
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_audit_records_successful_submit() {
+        let store = Arc::new(chain_bridge_persistence::InMemoryAuditStore::new());
+        let service = create_test_service().with_audit(store.clone());
+
+        let to = Pubkey::new_unique();
+        let ix = solana_sdk::system_instruction::transfer(&Pubkey::default(), &to, 1000);
+        let tx = Transaction::new_with_payer(&[ix], Some(&Pubkey::default()));
+        let serialized = bincode::serialize(&tx).unwrap();
+        let identity = gridtokenx_blockchain_core::auth::SpiffeIdentity(
+            "spiffe://gridtokenx.th/prod/admin".to_string(),
+        );
+
+        assert_eq!(store.len().await, 0);
+        let result = service.sign_and_submit(&serialized, "platform_admin", &identity).await;
+        assert!(result.is_ok());
+        assert_eq!(store.len().await, 1, "successful submit must append one audit entry");
+    }
+
+    #[tokio::test]
+    async fn test_audit_records_policy_rejection() {
+        let store = Arc::new(chain_bridge_persistence::InMemoryAuditStore::new());
+        let service = create_test_service().with_audit(store.clone());
+
+        let config = gridtokenx_blockchain_core::config::SolanaProgramsConfig::default();
+        let oracle_program_id: Pubkey = config.oracle_program_id.parse().unwrap();
+        let ix = solana_sdk::instruction::Instruction {
+            program_id: oracle_program_id,
+            accounts: vec![],
+            data: vec![],
+        };
+        let tx = Transaction::new_with_payer(&[ix], Some(&Pubkey::default()));
+        let serialized = bincode::serialize(&tx).unwrap();
+        let identity = gridtokenx_blockchain_core::auth::SpiffeIdentity(
+            "spiffe://gridtokenx.th/prod/trading-service/matcher".to_string(),
+        );
+
+        let result = service.sign_and_submit(&serialized, "platform_admin", &identity).await;
+        assert!(result.is_err());
+        assert_eq!(store.len().await, 1, "policy rejection must append one audit entry");
+    }
+
+    #[tokio::test]
+    async fn test_presign_simulation_rejects_before_signing() {
+        // A doomed transaction (sim returns a tx-level error) must be rejected
+        // before the Vault signing operation, and audited at stage="simulation".
+        let store = Arc::new(chain_bridge_persistence::InMemoryAuditStore::new());
+        let service = ChainBridgeGrpcService {
+            provider: Arc::new(FailingSimProvider(MockSolanaProvider {})),
+            vault: Arc::new(MockVaultProvider),
+            blockhash_cache: Arc::new(BlockhashCache::new()),
+            transit_key_name: "test-key".to_string(),
+            audit: store.clone(),
+        };
+
+        let to = Pubkey::new_unique();
+        let ix = solana_sdk::system_instruction::transfer(&Pubkey::default(), &to, 1000);
+        let tx = Transaction::new_with_payer(&[ix], Some(&Pubkey::default()));
+        let serialized = bincode::serialize(&tx).unwrap();
+        let identity = gridtokenx_blockchain_core::auth::SpiffeIdentity(
+            "spiffe://gridtokenx.th/prod/admin".to_string(),
+        );
+
+        let result = service.sign_and_submit(&serialized, "platform_admin", &identity).await;
+        assert!(result.is_err(), "failing pre-sign simulation must reject before signing");
+        assert_eq!(store.len().await, 1, "simulation rejection must append one audit entry");
     }
 
     #[tokio::test]

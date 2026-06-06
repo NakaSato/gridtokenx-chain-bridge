@@ -14,6 +14,14 @@ name = "gridtokenx-chain-bridge"
 path = "src/main.rs"
 
 [dependencies]
+# Shared telemetry init
+gridtokenx-telemetry = { path = "../gridtokenx-telemetry" }
+
+# Extracted member crates (de-orphaned: binary now consumes the hexagonal core +
+# its driven adapters). Audit hash-chain (Gap #2) wires in via these.
+chain-bridge-core = { path = "crates/chain-bridge-core" }
+chain-bridge-persistence = { path = "crates/chain-bridge-persistence" }
+
 # Web Framework
 axum = { version = "0.8.7", features = ["macros"] }
 tower = "0.5"
@@ -90,3 +98,15 @@ lto = true
 codegen-units = 1
 panic = 'abort'
 strip = true
+
+# ---------------------------------------------------------------------------
+# Workspace
+# ---------------------------------------------------------------------------
+# Incremental migration toward the 5-crate split (chain-bridge-{core,protocol,
+# persistence,logic,api}). The root package stays the running binary while each
+# member crate is extracted and wired in, so the signing path never breaks
+# mid-migration. End state: root becomes a virtual manifest, binary moves to
+# crates/chain-bridge-api.
+[workspace]
+members = ["crates/*"]
+resolver = "3"

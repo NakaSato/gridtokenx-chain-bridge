@@ -6,7 +6,6 @@ use axum::{
 use std::task::{Context, Poll};
 use tower::{Layer, Service};
 use tracing::info;
-use gridtokenx_blockchain_core::auth::SpiffeIdentity;
 use x509_parser::prelude::*;
 use std::sync::Arc;
 
@@ -108,6 +107,7 @@ pub fn extract_spiffe_id(cert_der: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gridtokenx_blockchain_core::auth::SpiffeIdentity;
     use rcgen::{CertificateParams, DnType, IsCa, KeyPair, SanType};
 
     /// Generate a DER-encoded self-signed certificate with a SPIFFE URI SAN.

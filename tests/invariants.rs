@@ -116,8 +116,8 @@ async fn test_trading_service_can_submit_trading_tx() {
     let tx = create_mock_tx(trading_program_id);
     let serialized = bincode::serialize(&tx).unwrap();
 
-    let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/trading-service".to_string());
-    
+    let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/trading-service/matcher".to_string());
+
     let result = core.sign_and_submit(&serialized, "platform_admin", &identity).await;
     assert!(result.is_ok(), "Trading matcher should be able to submit trading tx");
     assert_eq!(provider.send_count.load(Ordering::SeqCst), 1);

@@ -1,0 +1,25 @@
+[package]
+name = "chain-bridge-protocol"
+version = "0.1.0"
+edition = "2024"
+description = "Generated ConnectRPC/Tonic bindings for the gridtokenx.chain.v1 proto."
+
+[lib]
+name = "chain_bridge_protocol"
+path = "src/lib.rs"
+
+[dependencies]
+# ConnectRPC runtime + view types the generated code references.
+connectrpc = { version = "0.2.1", features = ["axum", "server", "client"] }
+buffa = "0.2.0"
+http = "1.0.0"
+http-body = "1.0.0"
+# The generated message types derive serde.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+futures = "0.3"
+
+[build-dependencies]
+buffa-build = "0.2.0"
+connectrpc-build = "0.2.0"
+tonic-build = "0.11"
