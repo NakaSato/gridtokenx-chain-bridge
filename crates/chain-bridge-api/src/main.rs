@@ -86,32 +86,57 @@ async fn main() -> anyhow::Result<()> {
     
     let metrics = Arc::new(gridtokenx_blockchain_core::rpc::metrics::NoopMetrics);
 
-    // NATS JetStream Setup
+    // NATS JetStream Setup — supervised. A single background task owns the
+    // connect → run → reconnect lifecycle so a NATS outage (at startup or later)
+    // self-heals instead of permanently disabling the async write path. This is
+    // spawned (non-blocking): the gRPC server below still starts NATS-down.
     let nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string());
-    if let Ok(nats_client) = async_nats::connect(&nats_url).await {
-        info!("✅ Connected to NATS at {}", nats_url);
-        let jetstream = async_nats::jetstream::new(nats_client);
-        
-        // Main consumer
-        let consumer = nats_consumer::NatsConsumer::new(jetstream.clone(), grpc_service.clone(), metrics.clone());
+    {
+        let nats_grpc_service = grpc_service.clone();
+        let nats_metrics = metrics.clone();
         tokio::spawn(async move {
-            info!("🚀 Starting NATS consumer loop");
-            if let Err(e) = consumer.start().await {
-                error!("❌ NATS consumer error: {}", e);
-            }
-        });
+            let mut backoff_ms = 500u64;
+            loop {
+                match async_nats::connect(&nats_url).await {
+                    Ok(nats_client) => {
+                        info!("✅ Connected to NATS at {}", nats_url);
+                        backoff_ms = 500;
+                        let jetstream = async_nats::jetstream::new(nats_client);
 
-        // DLQ Consumer (alerting/logging)
-        let dlq_signing_service = grpc_service.clone();
-        let dlq_jetstream = jetstream.clone();
-        tokio::spawn(async move {
-            info!("🚨 Starting NATS DLQ monitor");
-            if let Err(e) = run_dlq_monitor(dlq_jetstream, dlq_signing_service).await {
-                error!("❌ DLQ monitor error: {}", e);
+                        // DLQ monitor (alerting/logging) — supervised alongside;
+                        // aborted when the main consumer returns so the next
+                        // reconnect starts a fresh pair.
+                        let dlq_jetstream = jetstream.clone();
+                        let dlq_signing_service = nats_grpc_service.clone();
+                        let dlq_handle = tokio::spawn(async move {
+                            info!("🚨 Starting NATS DLQ monitor");
+                            if let Err(e) = run_dlq_monitor(dlq_jetstream, dlq_signing_service).await {
+                                error!("❌ DLQ monitor error: {}", e);
+                            }
+                        });
+
+                        // Main consumer — runs until its internal resilience loop
+                        // gives up (NATS unrecoverable); then we reconnect below.
+                        info!("🚀 Starting NATS consumer loop");
+                        let consumer = nats_consumer::NatsConsumer::new(
+                            jetstream,
+                            nats_grpc_service.clone(),
+                            nats_metrics.clone(),
+                        );
+                        match consumer.start().await {
+                            Ok(()) => warn!("⚠️ NATS consumer loop exited; reconnecting"),
+                            Err(e) => error!("❌ NATS consumer error: {}; reconnecting", e),
+                        }
+                        dlq_handle.abort();
+                    }
+                    Err(e) => {
+                        warn!("⚠️ Failed to connect to NATS at {} ({}); retrying in {}ms", nats_url, e, backoff_ms);
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(30_000);
             }
         });
-    } else {
-        warn!("⚠️ Failed to connect to NATS at {}. NATS path will be disabled.", nats_url);
     }
 
     // Initialise the gRPC router and convert to Axum-compatible service

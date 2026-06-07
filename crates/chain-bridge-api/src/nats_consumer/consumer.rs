@@ -25,10 +25,13 @@ impl NatsConsumer {
             ..Default::default()
         }).await?;
 
-        // Pull consumer with optimized batching (Wall 3 mitigation)
+        // Pull consumer with optimized batching (Wall 3 mitigation).
+        // Explicit idle_heartbeat + ack_wait so a jittery CB<->NATS link recovers
+        // instead of choking with repeated "missed idle heartbeat" (see start loop).
         let consumer = stream.get_or_create_consumer("chain-bridge-worker", async_nats::jetstream::consumer::pull::Config {
             durable_name: Some("chain-bridge-worker".to_string()),
             ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
+            ack_wait: std::time::Duration::from_secs(30),
             max_batch: 128,
             max_waiting: 512,
             ..Default::default()
@@ -50,33 +53,74 @@ impl NatsConsumer {
             }
         });
 
-        let messages = consumer.messages().await?;
         let self_arc = Arc::new(self);
+        let mut backoff_ms = 100u64;
+        let mut create_failures = 0u32;
 
-        // Concurrent message processing (Wall 3 mitigation)
-        messages.for_each_concurrent(32, |result| {
-            let self_clone = self_arc.clone();
-            async move {
-                match result {
-                    Ok(msg) => {
-                        match msg.subject.as_str() {
-                            "chain.tx.submit" => self_clone.handle_submit(msg).await,
-                            "chain.tx.simulate" => self_clone.handle_simulate(msg).await,
-                            "chain.tx.cancel" => self_clone.handle_cancel(msg).await,
-                            _ => {
-                                warn!("Unknown NATS subject: {}", msg.subject);
-                                let _ = msg.ack().await;
+        // Resilience loop. A missed-heartbeat or transient error can *end* the
+        // `messages()` stream; without re-creating it the consumer task would
+        // exit for good and messages would pile up unprocessed (the dead-consumer
+        // bug). On stream end we re-open the pull stream and keep going. Repeated
+        // failures to open the stream bubble up to the outer supervisor in
+        // `main()`, which reconnects NATS from scratch.
+        loop {
+            // Per-pull batch MUST stay <= the consumer's `max_batch` (128) or the
+            // server rejects every pull (409 ExceededMaxRequestBatch) — the default
+            // `consumer.messages()` asks for 200 and silently starves. Explicit
+            // heartbeat lets the resilience loop notice a genuinely dead link.
+            let messages = match consumer
+                .stream()
+                .max_messages_per_batch(100)
+                .expires(std::time::Duration::from_secs(30))
+                .heartbeat(std::time::Duration::from_secs(10))
+                .messages()
+                .await
+            {
+                Ok(m) => {
+                    create_failures = 0;
+                    backoff_ms = 100;
+                    m
+                }
+                Err(e) => {
+                    create_failures += 1;
+                    if create_failures >= 5 {
+                        return Err(anyhow::anyhow!(
+                            "NATS messages stream unrecoverable after {create_failures} attempts: {e}"
+                        ));
+                    }
+                    error!("Failed to open NATS messages stream (attempt {create_failures}): {e}; retrying in {backoff_ms}ms");
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                    backoff_ms = (backoff_ms * 2).min(5_000);
+                    continue;
+                }
+            };
+
+            // Concurrent message processing (Wall 3 mitigation)
+            messages.for_each_concurrent(32, |result| {
+                let self_clone = self_arc.clone();
+                async move {
+                    match result {
+                        Ok(msg) => {
+                            match msg.subject.as_str() {
+                                "chain.tx.submit" => self_clone.handle_submit(msg).await,
+                                "chain.tx.simulate" => self_clone.handle_simulate(msg).await,
+                                "chain.tx.cancel" => self_clone.handle_cancel(msg).await,
+                                _ => {
+                                    warn!("Unknown NATS subject: {}", msg.subject);
+                                    let _ = msg.ack().await;
+                                }
                             }
                         }
-                    }
-                    Err(e) => {
-                        error!("NATS message error: {}", e);
+                        Err(e) => {
+                            error!("NATS message error: {}", e);
+                        }
                     }
                 }
-            }
-        }).await;
+            }).await;
 
-        Ok(())
+            warn!("NATS messages stream ended; recreating consumer pull stream");
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
     }
 
     /// Effect-level dedup decision for the stable `idempotency_key`.
