@@ -123,5 +123,4 @@ adding submodules. Paths below are under `crates/chain-bridge-api/src/`.
   Vault signing details, the six scaling "walls" (Vault throughput, sync provider, single-threaded consumer,
   cache contention, mTLS amortisation, observability), and the AI agent-memory patterns.
 - **[README.md](README.md)** — architecture diagram, security/trust model, formal invariants.
-- **[TEST_CHECKLIST.md](TEST_CHECKLIST.md)** — manual + automated test matrix.
 - **`tests/invariants.rs`** — integration tests asserting the safety/liveness properties.

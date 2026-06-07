@@ -399,7 +399,7 @@ Steps 1–5 typically get you to 2–5k TPS. 6–8 get you past 10k. Past step 5
 
 ## AI Agent Memory System Patterns
 
-We have introduced a multi-layered AI Agent memory framework ([agent_memory.rs](file:///Users/chanthawat/Developments/gridtokenx-coresystem/gridtokenx-chain-bridge/src/agent_memory.rs)) designed to provide structured cognitive layers for agents processing transactions or executing tasks within the GridTokenX bridge ecosystem.
+We have introduced a multi-layered AI Agent memory framework ([agent_memory.rs](crates/chain-bridge-api/src/agent_memory.rs)) designed to provide structured cognitive layers for agents processing transactions or executing tasks within the GridTokenX bridge ecosystem.
 
 ### 1. Core Invariants & Rules
 *   **Thread Safety First:** All layers (Short-Term, Long-Term, Episodic) must be wrapped in thread-safe locks (`Arc<RwLock<T>>`) to support concurrent read/write access from multi-threaded Tokio runtime tasks.
