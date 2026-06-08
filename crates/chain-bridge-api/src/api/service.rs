@@ -232,7 +232,7 @@ impl ChainBridgeService for ChainBridgeGrpcService {
         request: OwnedView<SimulateTransactionRequestView<'static>>,
     ) -> Result<(SimulateTransactionResponse, Context), ConnectError> {
         let role = self.extract_role(&ctx);
-        role.require_any(&[ServiceRole::TradingApi, ServiceRole::TradingMatcher, ServiceRole::OracleBridge, ServiceRole::IamService, ServiceRole::Admin])
+        role.require_any(&[ServiceRole::TradingApi, ServiceRole::TradingMatcher, ServiceRole::AggregatorBridge, ServiceRole::IamService, ServiceRole::Admin])
             .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
 
         info!("🔗 gRPC Received simulate_transaction request for key_id: {}", request.key_id);
@@ -261,7 +261,7 @@ impl ChainBridgeService for ChainBridgeGrpcService {
         request: OwnedView<SubmitTransactionRequestView<'static>>,
     ) -> Result<(SubmitTransactionResponse, Context), ConnectError> {
         let role = self.extract_role(&ctx);
-        role.require_any(&[ServiceRole::TradingApi, ServiceRole::TradingMatcher, ServiceRole::OracleBridge, ServiceRole::IamService, ServiceRole::Admin])
+        role.require_any(&[ServiceRole::TradingApi, ServiceRole::TradingMatcher, ServiceRole::AggregatorBridge, ServiceRole::IamService, ServiceRole::Admin])
             .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
 
         info!("🔗 gRPC Received submit_transaction request with key_id: {}", request.key_id);
@@ -309,7 +309,7 @@ impl ChainBridgeService for ChainBridgeGrpcService {
             ServiceRole::ApiGateway, 
             ServiceRole::TradingApi, 
             ServiceRole::TradingMatcher, 
-            ServiceRole::OracleBridge, 
+            ServiceRole::AggregatorBridge, 
             ServiceRole::IamService, 
             ServiceRole::Admin
         ])
@@ -343,7 +343,7 @@ impl ChainBridgeService for ChainBridgeGrpcService {
             ServiceRole::ApiGateway, 
             ServiceRole::TradingApi, 
             ServiceRole::TradingMatcher, 
-            ServiceRole::OracleBridge, 
+            ServiceRole::AggregatorBridge, 
             ServiceRole::IamService, 
             ServiceRole::Admin
         ])
@@ -384,7 +384,7 @@ impl ChainBridgeService for ChainBridgeGrpcService {
         role.require_any(&[
             ServiceRole::TradingApi, 
             ServiceRole::TradingMatcher, 
-            ServiceRole::OracleBridge, 
+            ServiceRole::AggregatorBridge, 
             ServiceRole::IamService, 
             ServiceRole::Admin
         ])
@@ -415,7 +415,7 @@ impl ChainBridgeService for ChainBridgeGrpcService {
         role.require_any(&[
             ServiceRole::TradingApi, 
             ServiceRole::TradingMatcher, 
-            ServiceRole::OracleBridge, 
+            ServiceRole::AggregatorBridge, 
             ServiceRole::IamService, 
             ServiceRole::Admin
         ])
@@ -455,7 +455,7 @@ impl ChainBridgeService for ChainBridgeGrpcService {
             ServiceRole::ApiGateway, 
             ServiceRole::TradingApi, 
             ServiceRole::TradingMatcher, 
-            ServiceRole::OracleBridge, 
+            ServiceRole::AggregatorBridge, 
             ServiceRole::IamService, 
             ServiceRole::Admin
         ])
@@ -491,7 +491,7 @@ impl ChainBridgeService for ChainBridgeGrpcService {
             ServiceRole::ApiGateway, 
             ServiceRole::TradingApi, 
             ServiceRole::TradingMatcher, 
-            ServiceRole::OracleBridge, 
+            ServiceRole::AggregatorBridge, 
             ServiceRole::IamService, 
             ServiceRole::Admin
         ])
@@ -533,7 +533,7 @@ impl ChainBridgeService for ChainBridgeGrpcService {
         role.require_any(&[
             ServiceRole::TradingApi, 
             ServiceRole::TradingMatcher, 
-            ServiceRole::OracleBridge, 
+            ServiceRole::AggregatorBridge, 
             ServiceRole::IamService, 
             ServiceRole::Admin
         ])
@@ -592,7 +592,7 @@ impl ChainBridgeService for ChainBridgeGrpcService {
             ServiceRole::ApiGateway, 
             ServiceRole::TradingApi, 
             ServiceRole::TradingMatcher, 
-            ServiceRole::OracleBridge, 
+            ServiceRole::AggregatorBridge, 
             ServiceRole::IamService, 
             ServiceRole::Admin
         ])
@@ -637,7 +637,7 @@ impl ChainBridgeService for ChainBridgeGrpcService {
             ServiceRole::ApiGateway,
             ServiceRole::TradingApi,
             ServiceRole::TradingMatcher,
-            ServiceRole::OracleBridge,
+            ServiceRole::AggregatorBridge,
             ServiceRole::IamService,
             ServiceRole::Admin
         ])

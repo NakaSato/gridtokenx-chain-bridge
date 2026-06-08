@@ -236,10 +236,10 @@
     }
 
     #[test]
-    fn test_nats_rbac_oracle_bridge_maps_correctly() {
-        let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/oracle-bridge".to_string());
+    fn test_nats_rbac_aggregator_bridge_maps_correctly() {
+        let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/aggregator-bridge".to_string());
         let role = ServiceRole::from(&identity);
-        assert_eq!(role, ServiceRole::OracleBridge);
+        assert_eq!(role, ServiceRole::AggregatorBridge);
     }
 
     #[test]
@@ -349,7 +349,7 @@
             reply_subject: "chain.tx.simresult.sim-456".to_string(),
             serialized_tx: vec![1, 2, 3],
             key_id: "platform_admin".to_string(),
-            service_identity: "spiffe://gridtokenx.th/prod/oracle-bridge".to_string(),
+            service_identity: "spiffe://gridtokenx.th/prod/aggregator-bridge".to_string(),
             created_at_ms: 1000,
         };
 

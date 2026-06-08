@@ -5,7 +5,7 @@ description: Patterns, gotchas, and high-throughput performance guidance for bui
 
 # GridTokenX Chain Bridge Patterns
 
-This skill captures the architectural patterns used by the **chain-bridge** service — the one component in GridTokenX that holds Solana signing authority — and generalises them to other microservices (trading-matcher, oracle-bridge, iam-service, api-gateway) that live in the same platform.
+This skill captures the architectural patterns used by the **chain-bridge** service — the one component in GridTokenX that holds Solana signing authority — and generalises them to other microservices (trading-matcher, aggregator-bridge, iam-service, api-gateway) that live in the same platform.
 
 The chain-bridge is the canonical reference: when in doubt about how to wire mTLS identity, how to structure a connectrpc handler, how to consume NATS with idempotency, or how to sign with Vault Transit, look at its implementation first and copy the shape.
 
@@ -97,7 +97,7 @@ Follow the existing shape in `src/api.rs`. The five steps, in order:
    }
    ```
 4. **Pick the RBAC allowlist carefully.** Look at the existing handlers:
-   - Read-only and broadly useful → `ApiGateway, TradingApi, TradingMatcher, OracleBridge, IamService, Admin` (see `get_balance`, `get_account_data`).
+   - Read-only and broadly useful → `ApiGateway, TradingApi, TradingMatcher, AggregatorBridge, IamService, Admin` (see `get_balance`, `get_account_data`).
    - Signing-capable → exclude `ApiGateway` (see `submit_transaction`). The api-gateway is the most exposed surface and should never be able to submit transactions directly.
    - Blockhash/slot/fees → no `ApiGateway` either, since these are typically needed only by signers and matchers.
 5. **Add a unit test** using `MockSolanaProvider` and `authenticated_ctx()`. If the handler has an RBAC constraint tighter than the default admin role, also add an `unauthenticated_ctx()` test.
@@ -233,7 +233,7 @@ The client certs must carry a SPIFFE URI in the SAN — otherwise `extract_spiff
 
 ## Building a sibling service in this style
 
-If you're scaffolding a new service (say, `oracle-bridge` or a new `grid-reliability` service), copy the chain-bridge shape:
+If you're scaffolding a new service (say, `aggregator-bridge` or a new `grid-reliability` service), copy the chain-bridge shape:
 
 1. **`main.rs`** — keep the `MtlsAcceptor` + `ConnectionService` + `PeerCertLayer` trio verbatim. They're not specific to chain-bridge; they're the platform mTLS harness. Factor them into a shared crate if you're doing this more than twice.
 2. **A `*GrpcService` struct** holding whatever clients you need (Solana provider, Vault client, a DB pool, etc.) behind `Arc`s. Put an `extract_role(&ctx)` method on it and call it first in every handler.
@@ -361,7 +361,7 @@ At 10k TPS you cannot debug by reading logs. You need:
 1. **Per-stage latency histograms** — handshake, auth, Vault sign, Solana RPC, total. Prometheus histograms, not counters. `BlockchainMetrics::track_operation` is the hook; make sure every critical path calls it with an accurate stage label.
 2. **In-flight gauges** — number of open gRPC streams, number of in-flight Vault calls, NATS consumer lag. These are leading indicators; latency is lagging.
 3. **Saturation signals** — Tokio runtime worker count vs. blocked-on-IO count (via `tokio-metrics`). When these converge you're about to tip over.
-4. **Per-caller breakdown** — tag metrics with the SPIFFE service name. "TPS is up" means nothing; "trading-matcher is doing 8k TPS and oracle-bridge is doing 2k TPS" is actionable.
+4. **Per-caller breakdown** — tag metrics with the SPIFFE service name. "TPS is up" means nothing; "trading-matcher is doing 8k TPS and aggregator-bridge is doing 2k TPS" is actionable.
 
 ### Load-test plan before you ship any of this
 

@@ -125,7 +125,7 @@ The Policy Engine enforces that each service can only invoke its designated on-c
 |---|---|---|
 | `spiffe://gridtokenx.th/prod/admin` | All (bypass) | — |
 | `spiffe://gridtokenx.th/prod/trading-service` | System, Trading, Registry, Energy Token | `SolanaProgramsConfig` |
-| `spiffe://gridtokenx.th/prod/oracle-bridge` | System, Oracle only | `SolanaProgramsConfig` |
+| `spiffe://gridtokenx.th/prod/aggregator-bridge` | System, Oracle only | `SolanaProgramsConfig` |
 | `spiffe://gridtokenx.th/prod/iam-service` | System, Registry | `SolanaProgramsConfig` |
 | Unknown identity | **Rejected** | — |
 
@@ -139,7 +139,7 @@ The System Program (`11111111111111111111111111`) is always allowed. All other p
 | `spiffe://gridtokenx.th/prod/iam-service` | `IamService` | Read + Submit + Airdrop |
 | `spiffe://gridtokenx.th/prod/trading-service/api` | `TradingApi` | Read + Submit |
 | `spiffe://gridtokenx.th/prod/trading-service/matcher` | `TradingMatcher` | Read + Submit |
-| `spiffe://gridtokenx.th/prod/oracle-bridge` | `OracleBridge` | Read + Submit |
+| `spiffe://gridtokenx.th/prod/aggregator-bridge` | `AggregatorBridge` | Read + Submit |
 | `spiffe://gridtokenx.th/prod/settlement-service` | `SettlementService` | Read + Submit |
 | `spiffe://gridtokenx.th/prod/reporting-service` | `ReportingService` | Read-only RPCs |
 | `spiffe://gridtokenx.th/prod/admin` | `Admin` | Full access (all RPCs) |
@@ -224,7 +224,7 @@ NATS message schemas (defined in `gridtokenx-blockchain-core`):
 
 ### SPIFFE/mTLS Identity & RBAC
 - Extracts SPIFFE URIs from client X.509 certificates via mutual TLS.
-- Maps identities to `ServiceRole` (9 roles: Admin, ApiGateway, IamService, TradingApi, TradingMatcher, OracleBridge, SettlementService, ReportingService, Unknown).
+- Maps identities to `ServiceRole` (9 roles: Admin, ApiGateway, IamService, TradingApi, TradingMatcher, AggregatorBridge, SettlementService, ReportingService, Unknown).
 - Role-based access control enforced **before** any blockchain operation.
 - Three-tier identity resolution: mTLS cert → `z-gridtokenx-spiffe-id` header → `x-gridtokenx-role` header (dev escape hatch).
 - ApiGateway role requires `x-gridtokenx-gateway-secret` header matching `GATEWAY_SECRET` env var.
@@ -266,15 +266,15 @@ Chain Bridge exposes a ConnectRPC service (`ChainBridgeService`) with 12 RPCs:
 
 | RPC Method | Description | Allowed Roles |
 |------------|-------------|---------------|
-| `SimulateTransaction` | Dry-run a transaction | TradingApi, TradingMatcher, OracleBridge, IamService, Admin |
-| `SubmitTransaction` | Sign via Vault + submit to Solana | TradingApi, TradingMatcher, OracleBridge, IamService, Admin |
+| `SimulateTransaction` | Dry-run a transaction | TradingApi, TradingMatcher, AggregatorBridge, IamService, Admin |
+| `SubmitTransaction` | Sign via Vault + submit to Solana | TradingApi, TradingMatcher, AggregatorBridge, IamService, Admin |
 | `GetBalance` | Query SOL balance | **All except Unknown** |
 | `GetAccountData` | Fetch raw account data | **All except Unknown** |
-| `GetLatestBlockhash` | Get latest blockhash (cached) | TradingApi, TradingMatcher, OracleBridge, IamService, Admin |
-| `GetRecentPrioritizationFees` | Query priority fee estimates | TradingApi, TradingMatcher, OracleBridge, IamService, Admin |
+| `GetLatestBlockhash` | Get latest blockhash (cached) | TradingApi, TradingMatcher, AggregatorBridge, IamService, Admin |
+| `GetRecentPrioritizationFees` | Query priority fee estimates | TradingApi, TradingMatcher, AggregatorBridge, IamService, Admin |
 | `GetTokenAccountBalance` | SPL token balance query | **All except Unknown** |
 | `GetSignatureStatus` | Check transaction confirmation | **All except Unknown** |
-| `GetSlot` | Current slot height | TradingApi, TradingMatcher, OracleBridge, IamService, Admin |
+| `GetSlot` | Current slot height | TradingApi, TradingMatcher, AggregatorBridge, IamService, Admin |
 | `RequestAirdrop` | Dev/testnet airdrop | **Admin, IamService only** |
 | `GetTransactionDetails` | Full transaction details | **All except Unknown** |
 | `GetEpochInfo` | Epoch and slot information | **All except Unknown** |

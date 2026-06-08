@@ -156,7 +156,7 @@ async fn test_oracle_service_can_submit_oracle_tx() {
     let tx = create_mock_tx(oracle_program_id);
     let serialized = bincode::serialize(&tx).unwrap();
 
-    let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/oracle-bridge".to_string());
+    let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/aggregator-bridge".to_string());
 
     let result = core.sign_and_submit(&serialized, "platform_admin", &identity, "").await;
     assert!(result.is_ok(), "Oracle Bridge should be able to submit oracle tx");
@@ -174,7 +174,7 @@ async fn test_oracle_service_cannot_submit_trading_tx() {
     let tx = create_mock_tx(trading_program_id);
     let serialized = bincode::serialize(&tx).unwrap();
 
-    let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/oracle-bridge".to_string());
+    let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/aggregator-bridge".to_string());
 
     let result = core.sign_and_submit(&serialized, "platform_admin", &identity, "").await;
     assert!(result.is_err(), "Oracle Bridge should NOT be able to submit trading tx");
@@ -268,7 +268,7 @@ async fn test_system_program_always_allowed() {
     let serialized = bincode::serialize(&tx).unwrap();
 
     // Oracle bridge should be able to call system program
-    let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/oracle-bridge".to_string());
+    let identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/aggregator-bridge".to_string());
 
     let result = core.sign_and_submit(&serialized, "platform_admin", &identity, "").await;
     assert!(result.is_ok(), "System program should be allowed for all known identities");
