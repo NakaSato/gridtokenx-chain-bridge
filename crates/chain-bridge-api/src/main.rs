@@ -184,9 +184,12 @@ async fn main() -> anyhow::Result<()> {
         let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store))
             .build()?;
 
-        let server_config = rustls::ServerConfig::builder()
+        let mut server_config = rustls::ServerConfig::builder()
             .with_client_cert_verifier(verifier)
             .with_single_cert(cert_chain, key)?;
+        // gRPC clients (tonic) negotiate h2 via ALPN and refuse the connection
+        // without it; http/1.1 stays for Connect-protocol callers (curl, e2e).
+        server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         let server_config = Arc::new(server_config);
 
         info!("🔐 Chain Bridge listening with mTLS on {}", grpc_addr);

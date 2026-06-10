@@ -742,3 +742,88 @@
         assert!(result.is_err());
         assert_eq!(result.err().unwrap().code, ErrorCode::PermissionDenied);
     }
+
+    fn settlement_ctx() -> Context {
+        let mut ctx = Context::default();
+        ctx.headers.insert("z-gridtokenx-spiffe-id", "spiffe://gridtokenx.th/prod/settlement-service".parse().unwrap());
+        ctx
+    }
+
+    fn reporting_ctx() -> Context {
+        let mut ctx = Context::default();
+        ctx.headers.insert("z-gridtokenx-spiffe-id", "spiffe://gridtokenx.th/prod/reporting-service".parse().unwrap());
+        ctx
+    }
+
+    #[tokio::test]
+    async fn test_submit_transaction_settlement_service_allowed() {
+        let service = create_test_service();
+        let to = Pubkey::new_unique();
+        let ix = solana_sdk::system_instruction::transfer(&Pubkey::default(), &to, 1000);
+        let tx = Transaction::new_with_payer(&[ix], Some(&Pubkey::default()));
+        let serialized_tx = bincode::serialize(&tx).unwrap();
+
+        let mut request_owned = SubmitTransactionRequest::default();
+        request_owned.serialized_transaction = serialized_tx;
+        request_owned.key_id = "platform_admin".to_string();
+        let request = OwnedView::from_owned(&request_owned).unwrap();
+
+        let (resp, _) = service.submit_transaction(settlement_ctx(), request).await.unwrap();
+        assert!(resp.success, "Settlement service should pass RBAC and policy for a system tx");
+        assert!(!resp.signature.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_submit_transaction_reporting_service_denied() {
+        let service = create_test_service();
+        let mut request_owned = SubmitTransactionRequest::default();
+        request_owned.key_id = "platform_admin".to_string();
+        let request = OwnedView::from_owned(&request_owned).unwrap();
+
+        let result = service.submit_transaction(reporting_ctx(), request).await;
+        assert!(result.is_err(), "Reporting service is read-only");
+        assert_eq!(result.err().unwrap().code, ErrorCode::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn test_simulate_transaction_reporting_service_denied() {
+        let service = create_test_service();
+        let mut request_owned = chain_v1::SimulateTransactionRequest::default();
+        request_owned.key_id = "platform_admin".to_string();
+        let request = OwnedView::from_owned(&request_owned).unwrap();
+
+        let result = service.simulate_transaction(reporting_ctx(), request).await;
+        assert!(result.is_err(), "Simulate is write-adjacent; reporting service is excluded");
+        assert_eq!(result.err().unwrap().code, ErrorCode::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn test_get_balance_reporting_service_allowed() {
+        let service = create_test_service();
+        let mut request_owned = GetBalanceRequest::default();
+        request_owned.pubkey = Pubkey::new_unique().to_string();
+        let request = OwnedView::from_owned(&request_owned).unwrap();
+
+        let (resp, _) = service.get_balance(reporting_ctx(), request).await.unwrap();
+        assert_eq!(resp.lamports, 1000000000);
+    }
+
+    #[tokio::test]
+    async fn test_get_slot_reporting_service_allowed() {
+        let service = create_test_service();
+        let request_owned = chain_v1::GetSlotRequest::default();
+        let request = OwnedView::from_owned(&request_owned).unwrap();
+
+        let (resp, _) = service.get_slot(reporting_ctx(), request).await.unwrap();
+        assert_eq!(resp.slot, 100);
+    }
+
+    #[tokio::test]
+    async fn test_get_latest_blockhash_settlement_service_allowed() {
+        let service = create_test_service();
+        let request_owned = chain_v1::GetLatestBlockhashRequest::default();
+        let request = OwnedView::from_owned(&request_owned).unwrap();
+
+        let (resp, _) = service.get_latest_blockhash(settlement_ctx(), request).await.unwrap();
+        assert!(!resp.blockhash.is_empty());
+    }

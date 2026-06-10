@@ -232,7 +232,7 @@ impl ChainBridgeService for ChainBridgeGrpcService {
         request: OwnedView<SimulateTransactionRequestView<'static>>,
     ) -> Result<(SimulateTransactionResponse, Context), ConnectError> {
         let role = self.extract_role(&ctx);
-        role.require_any(&[ServiceRole::TradingApi, ServiceRole::TradingMatcher, ServiceRole::AggregatorBridge, ServiceRole::IamService, ServiceRole::Admin])
+        role.require_any(&[ServiceRole::TradingApi, ServiceRole::TradingMatcher, ServiceRole::AggregatorBridge, ServiceRole::IamService, ServiceRole::SettlementService, ServiceRole::Admin])
             .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
 
         info!("🔗 gRPC Received simulate_transaction request for key_id: {}", request.key_id);
@@ -261,7 +261,7 @@ impl ChainBridgeService for ChainBridgeGrpcService {
         request: OwnedView<SubmitTransactionRequestView<'static>>,
     ) -> Result<(SubmitTransactionResponse, Context), ConnectError> {
         let role = self.extract_role(&ctx);
-        role.require_any(&[ServiceRole::TradingApi, ServiceRole::TradingMatcher, ServiceRole::AggregatorBridge, ServiceRole::IamService, ServiceRole::Admin])
+        role.require_any(&[ServiceRole::TradingApi, ServiceRole::TradingMatcher, ServiceRole::AggregatorBridge, ServiceRole::IamService, ServiceRole::SettlementService, ServiceRole::Admin])
             .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
 
         info!("🔗 gRPC Received submit_transaction request with key_id: {}", request.key_id);
@@ -306,11 +306,13 @@ impl ChainBridgeService for ChainBridgeGrpcService {
     ) -> Result<(GetBalanceResponse, Context), ConnectError> {
         let role = self.extract_role(&ctx);
         role.require_any(&[
-            ServiceRole::ApiGateway, 
-            ServiceRole::TradingApi, 
-            ServiceRole::TradingMatcher, 
-            ServiceRole::AggregatorBridge, 
-            ServiceRole::IamService, 
+            ServiceRole::ApiGateway,
+            ServiceRole::TradingApi,
+            ServiceRole::TradingMatcher,
+            ServiceRole::AggregatorBridge,
+            ServiceRole::IamService,
+            ServiceRole::SettlementService,
+            ServiceRole::ReportingService,
             ServiceRole::Admin
         ])
         .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
@@ -340,11 +342,13 @@ impl ChainBridgeService for ChainBridgeGrpcService {
     ) -> Result<(GetAccountDataResponse, Context), ConnectError> {
         let role = self.extract_role(&ctx);
         role.require_any(&[
-            ServiceRole::ApiGateway, 
-            ServiceRole::TradingApi, 
-            ServiceRole::TradingMatcher, 
-            ServiceRole::AggregatorBridge, 
-            ServiceRole::IamService, 
+            ServiceRole::ApiGateway,
+            ServiceRole::TradingApi,
+            ServiceRole::TradingMatcher,
+            ServiceRole::AggregatorBridge,
+            ServiceRole::IamService,
+            ServiceRole::SettlementService,
+            ServiceRole::ReportingService,
             ServiceRole::Admin
         ])
         .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
@@ -382,10 +386,12 @@ impl ChainBridgeService for ChainBridgeGrpcService {
     ) -> Result<(GetLatestBlockhashResponse, Context), ConnectError> {
         let role = self.extract_role(&ctx);
         role.require_any(&[
-            ServiceRole::TradingApi, 
-            ServiceRole::TradingMatcher, 
-            ServiceRole::AggregatorBridge, 
-            ServiceRole::IamService, 
+            ServiceRole::TradingApi,
+            ServiceRole::TradingMatcher,
+            ServiceRole::AggregatorBridge,
+            ServiceRole::IamService,
+            ServiceRole::SettlementService,
+            ServiceRole::ReportingService,
             ServiceRole::Admin
         ])
         .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
@@ -413,10 +419,12 @@ impl ChainBridgeService for ChainBridgeGrpcService {
     ) -> Result<(GetRecentPrioritizationFeesResponse, Context), ConnectError> {
         let role = self.extract_role(&ctx);
         role.require_any(&[
-            ServiceRole::TradingApi, 
-            ServiceRole::TradingMatcher, 
-            ServiceRole::AggregatorBridge, 
-            ServiceRole::IamService, 
+            ServiceRole::TradingApi,
+            ServiceRole::TradingMatcher,
+            ServiceRole::AggregatorBridge,
+            ServiceRole::IamService,
+            ServiceRole::SettlementService,
+            ServiceRole::ReportingService,
             ServiceRole::Admin
         ])
         .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
@@ -452,11 +460,13 @@ impl ChainBridgeService for ChainBridgeGrpcService {
     ) -> Result<(GetTokenAccountBalanceResponse, Context), ConnectError> {
         let role = self.extract_role(&ctx);
         role.require_any(&[
-            ServiceRole::ApiGateway, 
-            ServiceRole::TradingApi, 
-            ServiceRole::TradingMatcher, 
-            ServiceRole::AggregatorBridge, 
-            ServiceRole::IamService, 
+            ServiceRole::ApiGateway,
+            ServiceRole::TradingApi,
+            ServiceRole::TradingMatcher,
+            ServiceRole::AggregatorBridge,
+            ServiceRole::IamService,
+            ServiceRole::SettlementService,
+            ServiceRole::ReportingService,
             ServiceRole::Admin
         ])
         .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
@@ -488,11 +498,13 @@ impl ChainBridgeService for ChainBridgeGrpcService {
     ) -> Result<(GetSignatureStatusResponse, Context), ConnectError> {
         let role = self.extract_role(&ctx);
         role.require_any(&[
-            ServiceRole::ApiGateway, 
-            ServiceRole::TradingApi, 
-            ServiceRole::TradingMatcher, 
-            ServiceRole::AggregatorBridge, 
-            ServiceRole::IamService, 
+            ServiceRole::ApiGateway,
+            ServiceRole::TradingApi,
+            ServiceRole::TradingMatcher,
+            ServiceRole::AggregatorBridge,
+            ServiceRole::IamService,
+            ServiceRole::SettlementService,
+            ServiceRole::ReportingService,
             ServiceRole::Admin
         ])
         .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
@@ -531,10 +543,12 @@ impl ChainBridgeService for ChainBridgeGrpcService {
     ) -> Result<(GetSlotResponse, Context), ConnectError> {
         let role = self.extract_role(&ctx);
         role.require_any(&[
-            ServiceRole::TradingApi, 
-            ServiceRole::TradingMatcher, 
-            ServiceRole::AggregatorBridge, 
-            ServiceRole::IamService, 
+            ServiceRole::TradingApi,
+            ServiceRole::TradingMatcher,
+            ServiceRole::AggregatorBridge,
+            ServiceRole::IamService,
+            ServiceRole::SettlementService,
+            ServiceRole::ReportingService,
             ServiceRole::Admin
         ])
         .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
@@ -589,11 +603,13 @@ impl ChainBridgeService for ChainBridgeGrpcService {
     ) -> Result<(chain_v1::GetTransactionDetailsResponse, Context), ConnectError> {
         let role = self.extract_role(&ctx);
         role.require_any(&[
-            ServiceRole::ApiGateway, 
-            ServiceRole::TradingApi, 
-            ServiceRole::TradingMatcher, 
-            ServiceRole::AggregatorBridge, 
-            ServiceRole::IamService, 
+            ServiceRole::ApiGateway,
+            ServiceRole::TradingApi,
+            ServiceRole::TradingMatcher,
+            ServiceRole::AggregatorBridge,
+            ServiceRole::IamService,
+            ServiceRole::SettlementService,
+            ServiceRole::ReportingService,
             ServiceRole::Admin
         ])
         .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;

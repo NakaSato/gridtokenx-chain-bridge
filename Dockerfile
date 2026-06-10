@@ -20,6 +20,7 @@ WORKDIR /app
 # Copy dependency manifests and project structure
 COPY gridtokenx-chain-bridge/ gridtokenx-chain-bridge/
 COPY gridtokenx-blockchain-core/ gridtokenx-blockchain-core/
+COPY gridtokenx-telemetry/ gridtokenx-telemetry/
 
 WORKDIR /app/gridtokenx-chain-bridge
 

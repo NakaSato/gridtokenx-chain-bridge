@@ -402,8 +402,13 @@
             provider.clone(), vault, cache,
         ));
 
-        // Use a program ID that is explicitly allowed for trading-service in PolicyEngine
-        let trading_prog = "DXxHdUar3pUUKRnt4XAMA8rdYRpAsNY1xk3Zo4crShvY".parse::<Pubkey>().unwrap();
+        // Use a program ID that is explicitly allowed for trading-service in PolicyEngine.
+        // Derived from the shared SolanaProgramsConfig so it tracks the deployed id rather
+        // than a hardcoded value (the PolicyEngine allowlist reads the same config).
+        let trading_prog = gridtokenx_blockchain_core::config::SolanaProgramsConfig::from_env()
+            .trading_program_id
+            .parse::<Pubkey>()
+            .unwrap();
         let payer = Keypair::new();
         let ix = Instruction::new_with_bytes(trading_prog, &[1], vec![]);
         let msg = solana_sdk::message::Message::new(&[ix], Some(&payer.pubkey()));

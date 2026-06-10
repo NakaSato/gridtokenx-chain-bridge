@@ -125,11 +125,14 @@ The Policy Engine enforces that each service can only invoke its designated on-c
 |---|---|---|
 | `spiffe://gridtokenx.th/prod/admin` | All (bypass) | — |
 | `spiffe://gridtokenx.th/prod/trading-service` | System, Trading, Registry, Energy Token | `SolanaProgramsConfig` |
-| `spiffe://gridtokenx.th/prod/aggregator-bridge` | System, Oracle only | `SolanaProgramsConfig` |
+| `spiffe://gridtokenx.th/prod/aggregator-bridge` | System, Oracle, Energy Token, SPL ATA | `SolanaProgramsConfig` |
 | `spiffe://gridtokenx.th/prod/iam-service` | System, Registry | `SolanaProgramsConfig` |
+| `spiffe://gridtokenx.th/prod/settlement-service` | System, Trading, Energy Token | `SolanaProgramsConfig` |
+| `spiffe://gridtokenx.th/prod/apisix` | **Denied all submission** (read-only role) | — |
+| `spiffe://gridtokenx.th/prod/reporting-service` | **Denied all submission** (read-only role) | — |
 | Unknown identity | **Rejected** | — |
 
-The System Program (`11111111111111111111111111`) is always allowed. All other programs are validated per-instruction — a transaction with two instructions is rejected if either one calls an unauthorized program.
+The System Program (`11111111111111111111111111`) is always allowed for signing-capable roles; the read-only roles (`apisix`, `reporting-service`) are denied before per-instruction checks even for System-only transactions. All other programs are validated per-instruction — a transaction with two instructions is rejected if either one calls an unauthorized program.
 
 ### SPIFFE Identity Mapping
 
@@ -266,20 +269,20 @@ Chain Bridge exposes a ConnectRPC service (`ChainBridgeService`) with 12 RPCs:
 
 | RPC Method | Description | Allowed Roles |
 |------------|-------------|---------------|
-| `SimulateTransaction` | Dry-run a transaction | TradingApi, TradingMatcher, AggregatorBridge, IamService, Admin |
-| `SubmitTransaction` | Sign via Vault + submit to Solana | TradingApi, TradingMatcher, AggregatorBridge, IamService, Admin |
+| `SimulateTransaction` | Dry-run a transaction | TradingApi, TradingMatcher, AggregatorBridge, IamService, SettlementService, Admin |
+| `SubmitTransaction` | Sign via Vault + submit to Solana | TradingApi, TradingMatcher, AggregatorBridge, IamService, SettlementService, Admin |
 | `GetBalance` | Query SOL balance | **All except Unknown** |
 | `GetAccountData` | Fetch raw account data | **All except Unknown** |
-| `GetLatestBlockhash` | Get latest blockhash (cached) | TradingApi, TradingMatcher, AggregatorBridge, IamService, Admin |
-| `GetRecentPrioritizationFees` | Query priority fee estimates | TradingApi, TradingMatcher, AggregatorBridge, IamService, Admin |
+| `GetLatestBlockhash` | Get latest blockhash (cached) | All except Unknown and ApiGateway |
+| `GetRecentPrioritizationFees` | Query priority fee estimates | All except Unknown and ApiGateway |
 | `GetTokenAccountBalance` | SPL token balance query | **All except Unknown** |
 | `GetSignatureStatus` | Check transaction confirmation | **All except Unknown** |
-| `GetSlot` | Current slot height | TradingApi, TradingMatcher, AggregatorBridge, IamService, Admin |
+| `GetSlot` | Current slot height | All except Unknown and ApiGateway |
 | `RequestAirdrop` | Dev/testnet airdrop | **Admin, IamService only** |
 | `GetTransactionDetails` | Full transaction details | **All except Unknown** |
 | `GetEpochInfo` | Epoch and slot information | **All except Unknown** |
 
-> **Note**: `ApiGateway` is allowed on read operations but **not** on write operations (SimulateTransaction, SubmitTransaction) or infrastructure operations (GetLatestBlockhash, GetSlot, GetRecentPrioritizationFees).
+> **Note**: `ApiGateway` is allowed on read operations but **not** on write operations (SimulateTransaction, SubmitTransaction) or infrastructure operations (GetLatestBlockhash, GetSlot, GetRecentPrioritizationFees). `ReportingService` is read-only: it gets every read RPC (including blockhash/slot/fees) but is excluded from SimulateTransaction and SubmitTransaction, and the PolicyEngine denies it (and `ApiGateway`) all transaction submission as defense in depth on the NATS path.
 
 ---
 
@@ -331,10 +334,16 @@ VAULT_ADDR=http://localhost:8200         # HashiCorp Vault address
 VAULT_TOKEN=root                         # Vault token
 CHAIN_BRIDGE_VAULT_KEY_NAME=gridtokenx-bridge  # Transit key name
 
-# mTLS Certificates (production)
+# mTLS Certificates — server side (generate with `just gen-certs` in the superproject)
 CHAIN_BRIDGE_TLS_CERT=infra/certs/server.crt
 CHAIN_BRIDGE_TLS_KEY=infra/certs/server.key
 CHAIN_BRIDGE_TLS_CA=infra/certs/ca.crt
+
+# mTLS Certificates — client side (read by gridtokenx-blockchain-core BlockchainService)
+CHAIN_BRIDGE_CA_CERT=infra/certs/ca.crt          # trust anchor for verifying the bridge
+CHAIN_BRIDGE_CLIENT_CERT=infra/certs/client.crt  # per-service cert w/ SPIFFE URI SAN
+CHAIN_BRIDGE_CLIENT_KEY=infra/certs/client.key
+CHAIN_BRIDGE_TLS_DOMAIN=localhost                # SNI / server-cert hostname (chain-bridge in docker)
 
 # NATS JetStream
 NATS_URL=nats://localhost:4222           # NATS server URL
@@ -368,6 +377,32 @@ SOLANA_NETWORK=simnet \
 CHAIN_BRIDGE_INSECURE=true \
 cargo run
 ```
+
+### mTLS Mode (default in docker-compose)
+
+```bash
+# 1. Generate dev CA + server cert + per-SPIFFE-identity client certs (superproject root)
+just gen-certs        # → infra/certs/{ca.crt,server.crt,server.key,clients/*.{crt,key}}
+
+# 2. Start Chain Bridge with TLS
+CHAIN_BRIDGE_TLS_CERT=infra/certs/server.crt \
+CHAIN_BRIDGE_TLS_KEY=infra/certs/server.key \
+CHAIN_BRIDGE_TLS_CA=infra/certs/ca.crt \
+cargo run
+
+# 3. Smoke-test with a client cert (identity = SPIFFE URI SAN in the cert)
+curl --cacert infra/certs/ca.crt \
+     --cert infra/certs/clients/admin.crt --key infra/certs/clients/admin.key \
+     -X POST https://localhost:5040/gridtokenx.chain.v1.ChainBridgeService/GetSlot \
+     -H 'content-type: application/json' -d '{}'
+```
+
+Clients (IAM, Trading, Aggregator Bridge) reuse `gridtokenx-blockchain-core`'s
+`BlockchainService`, which picks up `CHAIN_BRIDGE_CA_CERT` / `CHAIN_BRIDGE_CLIENT_CERT` /
+`CHAIN_BRIDGE_CLIENT_KEY` and rewrites `http://` → `https://` for the TLS channel.
+The dev CA is a static stand-in for SPIRE-issued SVIDs in production. Note the NATS
+write path carries a self-asserted `service_identity` (no transport-level proof) —
+mTLS secures the gRPC path only; NATS identity hardening is future SPIRE/NATS-auth work.
 
 ### Production (mTLS + Vault)
 
@@ -411,15 +446,15 @@ VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root \
 
 | Section | Tests | Infrastructure |
 |---------|-------|---------------|
-| **Unit (api.rs)** | 28 tests — blockhash cache, submit, simulate, balance, epoch, account data, RBAC, env overrides | None (mocks) |
-| **Unit (nats_consumer.rs)** | 15 tests — idempotency, staleness, message parsing, identity mapping | None (mocks) |
+| **Unit (api/)** | 41 tests — blockhash cache, submit, simulate, balance, epoch, account data, RBAC (incl. settlement/reporting roles), env overrides | None (mocks) |
+| **Unit (nats_consumer/)** | 21 tests — idempotency, staleness, message parsing, identity mapping | None (mocks) |
 | **Unit (vault.rs)** | 7 tests — pubkey caching, signature parsing, insecure provider | None (mocks) |
 | **Unit (middleware.rs)** | 8 tests — X.509 cert extraction, Tower layer integration | None (mocks) |
-| **Invariants (invariants.rs)** | 11 tests — Multi-service program allowlist matrix, admin bypass, system program | None (mocks) |
-| **Policy (blockchain-core)** | 3 tests — trading allowed, oracle denied, system program global | None |
-| **Auth (blockchain-core)** | 5 tests — role mapping, RBAC require/require_any | None |
+| **Invariants (invariants.rs)** | 17 tests — Multi-service program allowlist matrix (incl. settlement allow / reporting & gateway deny), admin bypass, system program | None (mocks) |
+| **Policy (blockchain-core)** | 11 tests — per-role program allowlists, read-only role denial, look-alike identity rejection | None |
+| **Auth (blockchain-core)** | 8 tests — role mapping, RBAC require/require_any | None |
 
-**Total: 77 tests (69 in chain-bridge, 8 in blockchain-core)**
+**Total: 113 tests in these sections (94 in chain-bridge, 19 in blockchain-core)**
 
 ---
 
