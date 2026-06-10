@@ -97,9 +97,9 @@ Follow the existing shape in `src/api.rs`. The five steps, in order:
    }
    ```
 4. **Pick the RBAC allowlist carefully.** Look at the existing handlers:
-   - Read-only and broadly useful → `ApiGateway, TradingApi, TradingMatcher, AggregatorBridge, IamService, Admin` (see `get_balance`, `get_account_data`).
-   - Signing-capable → exclude `ApiGateway` (see `submit_transaction`). The api-gateway is the most exposed surface and should never be able to submit transactions directly.
-   - Blockhash/slot/fees → no `ApiGateway` either, since these are typically needed only by signers and matchers.
+   - Read-only and broadly useful → `ApiGateway, TradingApi, TradingMatcher, AggregatorBridge, IamService, SettlementService, ReportingService, Admin` (see `get_balance`, `get_account_data`).
+   - Signing-capable → exclude `ApiGateway` **and** `ReportingService` (see `submit_transaction`). The api-gateway is the most exposed surface and the reporting service is read-only by design; neither may submit (or simulate) transactions. The PolicyEngine backs this with an explicit deny arm for both roles — the only write gate on the NATS path, where the consumer screens just `Unknown`.
+   - Blockhash/slot/fees → no `ApiGateway`, but the read-capable internal services (`SettlementService`, `ReportingService`) get them alongside the signers.
 5. **Add a unit test** using `MockSolanaProvider` and `authenticated_ctx()`. If the handler has an RBAC constraint tighter than the default admin role, also add an `unauthenticated_ctx()` test.
 
 **Do not** accept ambient `Result<_, ClientError>` from `solana_client` without wrapping it into a `ConnectError`. Leaking Solana RPC error types across the gRPC boundary leaks internal state.
@@ -205,7 +205,7 @@ cargo run
 ```
 Expect: `⚠️ Chain Bridge starting in INSECURE mode (no TLS)` in the first few log lines. If you don't see it, you're hitting the mTLS path and will need certs.
 
-**mTLS local mode:**
+**mTLS local mode** (default in docker-compose; generate certs first with `just gen-certs` at the superproject root — dev CA + server cert + one client cert per SPIFFE identity under `infra/certs/clients/`):
 ```bash
 export CHAIN_BRIDGE_TLS_CERT=infra/certs/server.crt
 export CHAIN_BRIDGE_TLS_KEY=infra/certs/server.key
@@ -214,7 +214,9 @@ export VAULT_ADDR=http://localhost:8200
 export VAULT_TOKEN=root
 cargo run
 ```
-The client certs must carry a SPIFFE URI in the SAN — otherwise `extract_spiffe_id` returns `None`, no identity gets injected, `extract_role` returns `Unknown`, and every call gets `PermissionDenied`. If you're seeing blanket permission-denied in local dev, that's usually the cause. Generate certs with a SAN URI like `spiffe://gridtokenx.th/dev/trading-matcher`.
+The client certs must carry a SPIFFE URI in the SAN — otherwise `extract_spiffe_id` returns `None`, no identity gets injected, `extract_role` returns `Unknown`, and every call gets `PermissionDenied`. If you're seeing blanket permission-denied in local dev, that's usually the cause. `just gen-certs` bakes the right URI SANs in (e.g. `spiffe://gridtokenx.th/prod/trading-service/api`).
+
+Client side: `gridtokenx-blockchain-core`'s `BlockchainService` reads `CHAIN_BRIDGE_CA_CERT` / `CHAIN_BRIDGE_CLIENT_CERT` / `CHAIN_BRIDGE_CLIENT_KEY` (+ `CHAIN_BRIDGE_TLS_DOMAIN` for SNI) and rewrites `http://` → `https://` for the TLS channel — tonic only applies TLS on https URLs.
 
 **NATS is optional at startup.** The `if let Ok(nats_client) = async_nats::connect(...)` means the service starts even if NATS is down — you just won't have the async path. Look for `✅ Connected to NATS` vs `⚠️ Failed to connect to NATS` in the logs.
 
