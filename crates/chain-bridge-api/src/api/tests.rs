@@ -664,14 +664,15 @@
 
     #[tokio::test]
     async fn test_extract_role_env_overrides() {
-        let service = create_test_service();
-        
+        // Exercise the dev-mode branches via the pure `role_from` helper instead of
+        // setting CHAIN_BRIDGE_INSECURE/CHAIN_BRIDGE_ALLOW_HEADER_AUTH: those env
+        // vars are process-global and read by parallel tests (PolicyEngine reads
+        // CHAIN_BRIDGE_INSECURE), so mutating them here is a race.
+
         // 1. Insecure mode override
         {
             let ctx = Context::default();
-            unsafe { std::env::set_var("CHAIN_BRIDGE_INSECURE", "true"); }
-            let role = service.extract_role(&ctx);
-            unsafe { std::env::remove_var("CHAIN_BRIDGE_INSECURE"); }
+            let role = ChainBridgeGrpcService::role_from(&ctx, true, false);
             assert_eq!(role, ServiceRole::Admin, "Insecure mode should grant Admin");
         }
 
@@ -679,10 +680,23 @@
         {
             let mut ctx = Context::default();
             ctx.headers.insert("x-gridtokenx-role", "trading-matcher".parse().unwrap());
-            unsafe { std::env::set_var("CHAIN_BRIDGE_ALLOW_HEADER_AUTH", "true"); }
-            let role = service.extract_role(&ctx);
-            unsafe { std::env::remove_var("CHAIN_BRIDGE_ALLOW_HEADER_AUTH"); }
+            let role = ChainBridgeGrpcService::role_from(&ctx, false, true);
             assert_eq!(role, ServiceRole::TradingMatcher, "Header auth should grant TradingMatcher");
+        }
+
+        // 3. mTLS SPIFFE header wins over both dev flags
+        {
+            let mut ctx = Context::default();
+            ctx.headers.insert("z-gridtokenx-spiffe-id", "spiffe://gridtokenx.th/prod/iam-service".parse().unwrap());
+            let role = ChainBridgeGrpcService::role_from(&ctx, true, true);
+            assert_eq!(role, ServiceRole::IamService, "SPIFFE identity must take precedence over dev flags");
+        }
+
+        // 4. No identity, no flags → Unknown
+        {
+            let ctx = Context::default();
+            let role = ChainBridgeGrpcService::role_from(&ctx, false, false);
+            assert_eq!(role, ServiceRole::Unknown);
         }
     }
 

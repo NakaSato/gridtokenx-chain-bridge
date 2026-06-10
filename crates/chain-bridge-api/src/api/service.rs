@@ -66,6 +66,17 @@ impl ChainBridgeGrpcService {
     }
 
     pub(crate) fn extract_role(&self, ctx: &Context) -> ServiceRole {
+        let insecure = std::env::var("CHAIN_BRIDGE_INSECURE")
+            .map(|v| v.to_lowercase() == "true")
+            .unwrap_or(false);
+        let header_auth = std::env::var("CHAIN_BRIDGE_ALLOW_HEADER_AUTH").is_ok();
+        Self::role_from(ctx, insecure, header_auth)
+    }
+
+    /// Pure role resolution — env flags are passed in so tests can exercise the
+    /// dev-mode branches without mutating process-global env (which races with
+    /// parallel tests that read `CHAIN_BRIDGE_INSECURE`, e.g. via the PolicyEngine).
+    pub(crate) fn role_from(ctx: &Context, insecure: bool, header_auth: bool) -> ServiceRole {
         // Primary path: SPIFFE URI from verified TLS client certificate
         // We look for it in headers if we can't get it from extensions easily with connectrpc
         if let Some(spiffe_id) = ctx.headers.get("z-gridtokenx-spiffe-id").and_then(|v| v.to_str().ok()) {
@@ -76,13 +87,13 @@ impl ChainBridgeGrpcService {
         }
 
         // Dev-only fallback: trust everything when insecure mode is explicitly enabled
-        if std::env::var("CHAIN_BRIDGE_INSECURE").map(|v| v.to_lowercase() == "true").unwrap_or(false) {
+        if insecure {
             warn!("⚠️ Granting ADMIN role due to CHAIN_BRIDGE_INSECURE mode");
             return ServiceRole::Admin;
         }
 
         // Dev-only fallback: trust header only when escape hatch env var is set
-        if std::env::var("CHAIN_BRIDGE_ALLOW_HEADER_AUTH").is_ok() {
+        if header_auth {
             warn!("⚠️ Using header-based auth (dev mode only)");
             return ServiceRole::from_headers(&ctx.headers);
         }
