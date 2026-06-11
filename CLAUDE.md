@@ -63,6 +63,7 @@ adding submodules. Paths below are under `crates/chain-bridge-api/src/`.
 | `api/provider.rs` | `SolanaProvider` trait + `RealSolanaProvider` / `SurfpoolSolanaProvider` impls + `BlockhashCache` |
 | `api/service.rs` | `ChainBridgeGrpcService` — all gRPC handlers, `extract_role`, the `sign_and_submit` pipeline |
 | `nats_consumer/consumer.rs` | `NatsConsumer` subscribe loop + `handle_submit/simulate/cancel` + `claim_or_replay` |
+| `nats_consumer/auth.rs` | envelope authentication — `NatsAuthPolicy`, `check_envelope_auth` (cert→CA→SAN→signature) |
 | `nats_consumer/dedup.rs` | effect-level dedup types (`DedupRecord`, `DedupState`) |
 | `vault.rs` | `VaultProvider` trait, `VaultTransitClient`, dev-only `InsecureKeypairProvider` |
 | `harness.rs` | `MtlsAcceptor` / `MtlsStream` — custom axum-server acceptor injecting peer certs into request extensions |
@@ -81,6 +82,12 @@ adding submodules. Paths below are under `crates/chain-bridge-api/src/`.
   (`z-gridtokenx-spiffe-id` header injected by the acceptor) → `ServiceRole`. Header-based auth
   (`ServiceRole::from_headers`) is a dev-only escape hatch behind `CHAIN_BRIDGE_ALLOW_HEADER_AUTH`;
   `CHAIN_BRIDGE_INSECURE=true` grants blanket `Admin`. Unverified callers get `ServiceRole::Unknown`.
+- **NATS identity is cryptographically bound to the mTLS cert.** Publishers sign the canonical envelope
+  bytes (`gridtokenx_blockchain_core::rpc::envelope_auth`) with their mTLS client key; the consumer's
+  `nats_consumer/auth.rs` verifies cert → CA (`CHAIN_BRIDGE_TLS_CA`) → SPIFFE SAN == `service_identity` →
+  signature, **before** RBAC and any dedup claim. Rejection only when `CHAIN_BRIDGE_REQUIRE_SIGNED_NATS=true`
+  (default log-only with `nats_auth_*` metrics). Verification logic is pure (explicit flags + CA bytes) —
+  tests must never mutate env (the `role_from` race rule).
 - **Blockhash is served from cache.** A background task refreshes `BlockhashCache` every 2s (Wall 1
   mitigation). `sign_and_submit` reads the cache and only falls back to a slow RPC call if empty. Don't add
   a synchronous `get_latest_blockhash` to the hot path.
@@ -112,6 +119,7 @@ adding submodules. Paths below are under `crates/chain-bridge-api/src/`.
 | `CHAIN_BRIDGE_ALLOW_HEADER_AUTH` | unset | trust role from headers instead of mTLS (dev only) |
 | `CHAIN_BRIDGE_TLS_CERT/KEY/CA` | `infra/certs/*` | mTLS material |
 | `CHAIN_BRIDGE_VAULT_KEY_NAME` | `gridtokenx-bridge` | Vault Transit key used for signing |
+| `CHAIN_BRIDGE_REQUIRE_SIGNED_NATS` | `false` | reject NATS envelopes without a valid `EnvelopeAuth` (false = log-only) |
 | `VAULT_ADDR` / `VAULT_TOKEN` | `http://localhost:8200` / `root` | Vault Transit endpoint |
 | `SOLANA_NETWORK` | `mainnet` | `simnet` selects the in-memory Surfpool provider |
 | `SOLANA_RPC_URL` | `http://localhost:8899` | Solana RPC endpoint |

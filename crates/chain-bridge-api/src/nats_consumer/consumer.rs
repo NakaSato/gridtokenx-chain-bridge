@@ -5,6 +5,7 @@ impl NatsConsumer {
         jetstream: async_nats::jetstream::Context,
         signing_service: Arc<ChainBridgeGrpcService>,
         metrics: Arc<dyn BlockchainMetrics>,
+        auth_policy: NatsAuthPolicy,
     ) -> Self {
         Self {
             jetstream,
@@ -12,7 +13,56 @@ impl NatsConsumer {
             metrics,
             idempotency_cache: DashMap::new(),
             dedup_store: Arc::new(DashMap::new()),
+            auth_policy,
         }
+    }
+
+    /// Verify one envelope's [`EnvelopeAuth`] and decide whether to proceed.
+    ///
+    /// `Err(reason)` ⇒ reject (only possible when `require_signed` is on).
+    /// All three outcomes are logged/metered so log-only mode still surfaces
+    /// unsigned publishers (`nats_auth_unsigned`) and broken signatures
+    /// (`nats_auth_failed`) before enforcement is flipped on.
+    fn evaluate_envelope_auth(
+        &self,
+        auth: Option<&gridtokenx_blockchain_core::rpc::nats_schema::EnvelopeAuth>,
+        claimed_identity: &str,
+        canonical: &[u8],
+        correlation_id: &str,
+    ) -> Result<(), String> {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let check = super::auth::check_envelope_auth(
+            self.auth_policy.ca_der.as_deref(),
+            auth,
+            claimed_identity,
+            canonical,
+            now_secs,
+        );
+        match &check {
+            AuthCheck::Verified => {
+                self.metrics.track_operation("nats_auth_verified", 0.0, true);
+            }
+            AuthCheck::Unsigned => {
+                warn!(
+                    "⚠️ Unsigned NATS envelope from '{}' ({}) — accepted {} signing enforcement",
+                    claimed_identity,
+                    correlation_id,
+                    if self.auth_policy.require_signed { "pending" } else { "without" },
+                );
+                self.metrics.track_operation("nats_auth_unsigned", 0.0, true);
+            }
+            AuthCheck::Failed(reason) => {
+                error!(
+                    "🚨 NATS envelope auth FAILED for '{}' ({}): {}",
+                    claimed_identity, correlation_id, reason
+                );
+                self.metrics.track_operation("nats_auth_failed", 0.0, false);
+            }
+        }
+        super::auth::auth_decision(&check, self.auth_policy.require_signed)
     }
 
     pub async fn start(self) -> anyhow::Result<()> {
@@ -198,6 +248,30 @@ impl NatsConsumer {
             }
         };
 
+        // 0. Envelope authentication — must precede RBAC (which consumes the
+        // self-asserted service_identity) and any dedup claim (an unverified
+        // message must never claim a dedup slot).
+        let canonical =
+            gridtokenx_blockchain_core::rpc::envelope_auth::canonical_submit_bytes(&envelope);
+        if let Err(reason) = self.evaluate_envelope_auth(
+            envelope.auth.as_ref(),
+            &envelope.service_identity,
+            &canonical,
+            &envelope.correlation_id,
+        ) {
+            self.metrics.track_operation("nats_auth_rejected", 0.0, false);
+            self.publish_result(&envelope.reply_subject, TxResultMessage {
+                correlation_id: envelope.correlation_id,
+                success: false,
+                signature: None,
+                error: Some(format!("envelope authentication failed: {}", reason)),
+                slot: 0,
+                deduplicated: false,
+            }).await;
+            let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
+            return;
+        }
+
         // 1. Unified RBAC check
         let role = ServiceRole::from(&SpiffeIdentity(envelope.service_identity.clone()));
         if role == ServiceRole::Unknown {
@@ -363,11 +437,56 @@ impl NatsConsumer {
             }
         };
 
+        // 0. Envelope authentication (see handle_submit).
+        let canonical =
+            gridtokenx_blockchain_core::rpc::envelope_auth::canonical_simulate_bytes(&envelope);
+        if let Err(reason) = self.evaluate_envelope_auth(
+            envelope.auth.as_ref(),
+            &envelope.service_identity,
+            &canonical,
+            &envelope.correlation_id,
+        ) {
+            self.metrics.track_operation("nats_auth_rejected", 0.0, false);
+            let result_msg = TxSimulateResultMessage {
+                correlation_id: envelope.correlation_id,
+                success: false,
+                compute_units_consumed: 0,
+                error_message: format!("envelope authentication failed: {}", reason),
+                logs: vec![],
+            };
+            let payload = serde_json::to_vec(&result_msg).unwrap();
+            self.jetstream.publish(envelope.reply_subject, payload.into()).await.ok();
+            let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
+            return;
+        }
+
         // Identity Check
         let role = ServiceRole::from(&SpiffeIdentity(envelope.service_identity.clone()));
         if role == ServiceRole::Unknown {
             warn!("🚨 Unauthorised NATS simulate identity: {}", envelope.service_identity);
             let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
+            return;
+        }
+
+        // Staleness check (55s) — created_at_ms is inside the signed canonical
+        // bytes, so this bounds replay of captured signed envelopes (submit and
+        // cancel already had it; simulate was the gap).
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if now_ms.saturating_sub(envelope.created_at_ms) > 55_000 {
+            warn!("Rejecting stale simulate request: {}", envelope.correlation_id);
+            let result_msg = TxSimulateResultMessage {
+                correlation_id: envelope.correlation_id,
+                success: false,
+                compute_units_consumed: 0,
+                error_message: "Simulate request stale".to_string(),
+                logs: vec![],
+            };
+            let payload = serde_json::to_vec(&result_msg).unwrap();
+            self.jetstream.publish(envelope.reply_subject, payload.into()).await.ok();
+            let _ = msg.ack().await;
             return;
         }
 
@@ -416,6 +535,25 @@ impl NatsConsumer {
                 return;
             }
         };
+
+        // 0. Envelope authentication (see handle_submit).
+        let canonical =
+            gridtokenx_blockchain_core::rpc::envelope_auth::canonical_cancel_bytes(&envelope);
+        if let Err(reason) = self.evaluate_envelope_auth(
+            envelope.auth.as_ref(),
+            &envelope.service_identity,
+            &canonical,
+            &envelope.correlation_id,
+        ) {
+            self.metrics.track_operation("nats_auth_rejected", 0.0, false);
+            self.publish_cancel_result(&envelope.reply_subject, TxCancelResultMessage {
+                correlation_id: envelope.correlation_id,
+                success: false,
+                error: Some(format!("envelope authentication failed: {}", reason)),
+            }).await;
+            let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
+            return;
+        }
 
         // 1. RBAC Check
         let role = ServiceRole::from(&SpiffeIdentity(envelope.service_identity.clone()));

@@ -2,6 +2,7 @@
 //!
 //! Split from the former monolithic `nats_consumer.rs`:
 //! - [`dedup`]     — effect-level dedup types (`DedupRecord`, `DedupState`)
+//! - [`auth`]      — envelope authentication (cert + signature verification)
 //! - [`consumer`]  — the `NatsConsumer` impl (subscribe loops + handlers)
 //! - `tests`       — unit tests (cfg(test))
 
@@ -21,10 +22,13 @@ pub(crate) use crate::api::ChainBridgeGrpcService;
 pub(crate) use solana_sdk::transaction::Transaction;
 pub(crate) use solana_sdk::signature::Signature;
 
+pub mod auth;
 mod dedup;
 mod consumer;
 
 pub(crate) use dedup::{DedupRecord, DedupState};
+pub use auth::NatsAuthPolicy;
+pub(crate) use auth::AuthCheck;
 
 pub struct NatsConsumer {
     jetstream: async_nats::jetstream::Context,
@@ -36,6 +40,8 @@ pub struct NatsConsumer {
     /// `Arc` so the background cleanup task shares the same map (a bare
     /// `DashMap::clone()` deep-copies — see `idempotency_cache`).
     dedup_store: Arc<DashMap<String, DedupRecord>>,
+    /// Envelope-auth enforcement + CA trust root (see [`auth`]).
+    auth_policy: NatsAuthPolicy,
 }
 
 #[cfg(test)]

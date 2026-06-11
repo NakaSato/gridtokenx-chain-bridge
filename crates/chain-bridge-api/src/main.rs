@@ -91,6 +91,10 @@ async fn main() -> anyhow::Result<()> {
     // self-heals instead of permanently disabling the async write path. This is
     // spawned (non-blocking): the gRPC server below still starts NATS-down.
     let nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string());
+    // Envelope-auth policy: CHAIN_BRIDGE_REQUIRE_SIGNED_NATS + the same CA the
+    // mTLS server trusts (CHAIN_BRIDGE_TLS_CA). Loaded once, before the
+    // supervisor spawn; a missing CA degrades to log-only verification.
+    let nats_auth_policy = nats_consumer::NatsAuthPolicy::from_env();
     {
         let nats_grpc_service = grpc_service.clone();
         let nats_metrics = metrics.clone();
@@ -122,6 +126,7 @@ async fn main() -> anyhow::Result<()> {
                             jetstream,
                             nats_grpc_service.clone(),
                             nats_metrics.clone(),
+                            nats_auth_policy.clone(),
                         );
                         match consumer.start().await {
                             Ok(()) => warn!("⚠️ NATS consumer loop exited; reconnecting"),

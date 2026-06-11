@@ -207,12 +207,21 @@ NATS message schemas (defined in `gridtokenx-blockchain-core`):
 
 | Message | Direction | Fields |
 |---------|-----------|--------|
-| `TxSubmitMessage` | Publisher → Bridge | `correlation_id`, `reply_subject`, `serialized_tx`, `key_id`, `skip_preflight`, `retry_count`, `service_identity`, `created_at_ms` |
+| `TxSubmitMessage` | Publisher → Bridge | `correlation_id`, `reply_subject`, `serialized_tx`, `key_id`, `skip_preflight`, `retry_count`, `service_identity`, `created_at_ms`, `auth?` |
 | `TxResultMessage` | Bridge → Publisher | `correlation_id`, `success`, `signature?`, `error?`, `slot` |
-| `TxSimulateMessage` | Publisher → Bridge | `correlation_id`, `reply_subject`, `serialized_tx`, `key_id`, `service_identity`, `created_at_ms` |
+| `TxSimulateMessage` | Publisher → Bridge | `correlation_id`, `reply_subject`, `serialized_tx`, `key_id`, `service_identity`, `created_at_ms`, `auth?` |
 | `TxSimulateResultMessage` | Bridge → Publisher | `correlation_id`, `success`, `compute_units_consumed`, `error_message`, `logs` |
-| `TxCancelMessage` | Publisher → Bridge | `correlation_id`, `reply_subject`, `service_identity`, `created_at_ms` |
+| `TxCancelMessage` | Publisher → Bridge | `correlation_id`, `reply_subject`, `service_identity`, `created_at_ms`, `auth?` |
 | `TxCancelResultMessage` | Bridge → Publisher | `correlation_id`, `success`, `error?` |
+
+`auth?` is an optional `EnvelopeAuth { scheme, cert_pem, signature }`: the publisher signs the
+canonical envelope bytes (`gridtokenx_blockchain_core::rpc::envelope_auth`) with the private key
+of its mTLS client cert and attaches the cert PEM. The bridge verifies cert → dev CA, SPIFFE URI
+SAN == `service_identity`, then the signature — so the NATS identity claim is cryptographically
+bound to the same trust root as the gRPC path. Enforcement is gated by
+`CHAIN_BRIDGE_REQUIRE_SIGNED_NATS` (default `false` = log-only during rollout); unsigned or
+failing envelopes surface as `nats_auth_unsigned` / `nats_auth_failed` metrics before the flag
+is flipped on.
 
 ---
 
@@ -400,9 +409,12 @@ curl --cacert infra/certs/ca.crt \
 Clients (IAM, Trading, Aggregator Bridge) reuse `gridtokenx-blockchain-core`'s
 `BlockchainService`, which picks up `CHAIN_BRIDGE_CA_CERT` / `CHAIN_BRIDGE_CLIENT_CERT` /
 `CHAIN_BRIDGE_CLIENT_KEY` and rewrites `http://` → `https://` for the TLS channel.
-The dev CA is a static stand-in for SPIRE-issued SVIDs in production. Note the NATS
-write path carries a self-asserted `service_identity` (no transport-level proof) —
-mTLS secures the gRPC path only; NATS identity hardening is future SPIRE/NATS-auth work.
+The dev CA is a static stand-in for SPIRE-issued SVIDs in production. The NATS write
+path reuses the same trust root: publishers sign each envelope with their mTLS client
+key (`EnvelopeAuth`), and the bridge verifies cert → CA → SPIFFE SAN → signature, so
+`service_identity` is only trusted post-verification. Rejection is enforced once
+`CHAIN_BRIDGE_REQUIRE_SIGNED_NATS=true` (default is log-only); broker-level NATS
+auth/TLS remains future work.
 
 ### Production (mTLS + Vault)
 

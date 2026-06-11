@@ -441,3 +441,85 @@ async fn test_api_gateway_cannot_submit_any_tx() {
     assert!(result.is_err(), "API Gateway must never submit transactions");
     assert_eq!(provider.send_count.load(Ordering::SeqCst), 0);
 }
+
+// ---------------------------------------------------------------------------
+// NATS envelope authentication invariant: under an enforcing NatsAuthPolicy an
+// unsigned envelope is rejected, while a publisher-signed envelope whose mTLS
+// cert chains to the trusted CA and whose SPIFFE SAN matches the claimed
+// service_identity verifies end-to-end (canonical bytes shared with the
+// publisher in gridtokenx_blockchain_core::rpc::envelope_auth).
+// No env vars are touched — the policy is constructed directly.
+// ---------------------------------------------------------------------------
+#[test]
+fn test_unsigned_nats_envelope_rejected_when_enforced_signed_verifies() {
+    use gridtokenx_blockchain_core::rpc::envelope_auth::{
+        EnvelopeSigner, canonical_submit_bytes,
+    };
+    use gridtokenx_blockchain_core::rpc::nats_schema::TxSubmitMessage;
+    use gridtokenx_chain_bridge::nats_consumer::auth::{
+        AuthCheck, NatsAuthPolicy, auth_decision, check_envelope_auth,
+    };
+    use rcgen::{
+        BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, PKCS_ECDSA_P256_SHA256,
+        SanType,
+    };
+
+    const IDENTITY: &str = "spiffe://gridtokenx.th/prod/trading-service/matcher";
+    const NOW_SECS: i64 = 1_750_000_000;
+
+    // Dev CA + CA-signed leaf carrying the SPIFFE URI SAN (gen-certs.sh shape).
+    let mut ca_params = CertificateParams::default();
+    ca_params.distinguished_name.push(DnType::CommonName, "test-ca");
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+    let ca = ca_params.self_signed(&ca_key).unwrap();
+
+    let mut leaf_params = CertificateParams::default();
+    leaf_params.distinguished_name.push(DnType::CommonName, "leaf");
+    leaf_params
+        .subject_alt_names
+        .push(SanType::URI(IDENTITY.try_into().unwrap()));
+    let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+    let leaf = leaf_params.signed_by(&leaf_key, &ca, &ca_key).unwrap();
+
+    let policy = NatsAuthPolicy::new(true, Some(ca.der().to_vec()));
+    assert!(policy.require_signed);
+
+    let mut envelope = TxSubmitMessage {
+        correlation_id: "inv-1".to_string(),
+        idempotency_key: "inv-key".to_string(),
+        reply_subject: "chain.tx.result.inv-1".to_string(),
+        serialized_tx: vec![1, 2, 3],
+        key_id: "platform_admin".to_string(),
+        skip_preflight: false,
+        retry_count: 0,
+        service_identity: IDENTITY.to_string(),
+        created_at_ms: 1_700_000_000_000,
+        auth: None,
+    };
+    let canonical = canonical_submit_bytes(&envelope);
+
+    // Unsigned → rejected under enforcement.
+    let check = check_envelope_auth(
+        policy.ca_der.as_deref(),
+        envelope.auth.as_ref(),
+        IDENTITY,
+        &canonical,
+        NOW_SECS,
+    );
+    assert!(matches!(check, AuthCheck::Unsigned));
+    assert!(auth_decision(&check, policy.require_signed).is_err());
+
+    // Signed by the cert's key → Verified, decision Ok.
+    let signer = EnvelopeSigner::from_pem(leaf.pem(), &leaf_key.serialize_pem()).unwrap();
+    envelope.auth = Some(signer.sign(&canonical));
+    let check = check_envelope_auth(
+        policy.ca_der.as_deref(),
+        envelope.auth.as_ref(),
+        IDENTITY,
+        &canonical,
+        NOW_SECS,
+    );
+    assert!(matches!(check, AuthCheck::Verified), "got {check:?}");
+    assert!(auth_decision(&check, policy.require_signed).is_ok());
+}

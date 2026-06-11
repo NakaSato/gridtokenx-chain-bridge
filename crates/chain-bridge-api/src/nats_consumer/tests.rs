@@ -327,6 +327,7 @@
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as u64,
+            auth: None,
         };
 
         let json = serde_json::to_vec(&submit_msg).unwrap();
@@ -351,6 +352,7 @@
             key_id: "platform_admin".to_string(),
             service_identity: "spiffe://gridtokenx.th/prod/aggregator-bridge".to_string(),
             created_at_ms: 1000,
+            auth: None,
         };
 
         let json = serde_json::to_vec(&sim_msg).unwrap();
@@ -365,6 +367,7 @@
             reply_subject: "chain.tx.cancelresult.cancel-789".to_string(),
             service_identity: "spiffe://gridtokenx.th/prod/trading-service/matcher".to_string(),
             created_at_ms: 2000,
+            auth: None,
         };
 
         let json = serde_json::to_vec(&cancel_msg).unwrap();

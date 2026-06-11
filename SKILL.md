@@ -111,13 +111,14 @@ Follow the existing shape in `src/api.rs`. The five steps, in order:
 NATS is for fire-and-forget or async reply patterns. The shape in `src/nats_consumer.rs`:
 
 1. **Declare the subject under `chain.*.*`** (the stream binds `chain.tx.*`; if your subject lives outside that prefix, extend the `subjects` vec in `start()`).
-2. **Define the envelope in `gridtokenx_blockchain_core::rpc::nats_schema`** — it must carry `correlation_id`, `service_identity` (SPIFFE URI string), `reply_subject`, and `created_at_ms` at minimum. Everything you add should follow that shape.
+2. **Define the envelope in `gridtokenx_blockchain_core::rpc::nats_schema`** — it must carry `correlation_id`, `service_identity` (SPIFFE URI string), `reply_subject`, `created_at_ms`, and `auth: Option<EnvelopeAuth>` at minimum. Add a `canonical_*_bytes` function for it in `rpc::envelope_auth` (signer and verifier share that one implementation) and sign it in the publisher when a signer is available.
 3. **Match on `msg.subject.as_str()` in `NatsConsumer::start`** and dispatch to a new `handle_*` method.
-4. **Inside the handler, do the four checks in this order:**
+4. **Inside the handler, do the five checks in this order:**
    1. Deserialize payload → `Term` ack on failure (no retry — it's a bad message).
-   2. RBAC: `ServiceRole::from(&SpiffeIdentity(envelope.service_identity))`. `Unknown` → `Term` ack.
-   3. Idempotency: check `self.idempotency_cache`. If hit, plain `ack` and return — the caller already got a reply last time.
-   4. Staleness: reject if `now_ms - envelope.created_at_ms > 55_000`. The Solana blockhash window is ~60s, so anything older than 55s is likely to fail anyway; fail fast with a clear error instead of burning RPC.
+   2. Envelope auth: `self.evaluate_envelope_auth(...)` over the canonical bytes — verifies cert → CA, SPIFFE SAN == `service_identity`, signature. Must run **before** RBAC (which consumes the self-asserted identity) and before any dedup claim. Rejection (`Err`) only happens when `CHAIN_BRIDGE_REQUIRE_SIGNED_NATS=true`; log-only mode meters `nats_auth_verified|unsigned|failed`. On reject: publish error result, `Term` ack.
+   3. RBAC: `ServiceRole::from(&SpiffeIdentity(envelope.service_identity))`. `Unknown` → `Term` ack.
+   4. Idempotency: check `self.idempotency_cache`. If hit, plain `ack` and return — the caller already got a reply last time.
+   5. Staleness: reject if `now_ms - envelope.created_at_ms > 55_000`. The Solana blockhash window is ~60s, so anything older than 55s is likely to fail anyway; fail fast with a clear error instead of burning RPC. `created_at_ms` is inside the signed canonical bytes, so this also bounds replay of captured signed envelopes.
 5. **Use `tokio_retry` only for transient failures** (Solana RPC flakes, node-behind). Don't retry deserialization failures, auth failures, or stale messages.
 6. **Publish the result to `envelope.reply_subject`.** Both success and failure paths must publish — the caller is awaiting it.
 7. **Always `ack` the message** once you've published a result (success or failure). `Term` only for malformed/unauthenticated messages that should never be retried.
