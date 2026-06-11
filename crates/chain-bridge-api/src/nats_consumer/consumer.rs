@@ -307,6 +307,16 @@ impl NatsConsumer {
         if role == ServiceRole::Unknown {
             warn!("🚨 Unauthorised NATS service identity: {}", envelope.service_identity);
             self.audit_rejection(&envelope.correlation_id, &envelope.service_identity, "submit", "rbac", "unknown service role".to_string()).await;
+            // Reply with an explicit error — a silent Term ack leaves the
+            // publisher blocked until its submit_transaction timeout.
+            self.publish_result(&envelope.reply_subject, TxResultMessage {
+                correlation_id: envelope.correlation_id,
+                success: false,
+                signature: None,
+                error: Some(format!("Unauthorised service identity: {}", envelope.service_identity)),
+                slot: 0,
+                deduplicated: false,
+            }).await;
             let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
             return;
         }
@@ -501,6 +511,16 @@ impl NatsConsumer {
         if role == ServiceRole::Unknown {
             warn!("🚨 Unauthorised NATS simulate identity: {}", envelope.service_identity);
             self.audit_rejection(&envelope.correlation_id, &envelope.service_identity, "simulate", "rbac", "unknown service role".to_string()).await;
+            // Reply with an explicit error — see handle_submit's RBAC branch.
+            let result_msg = TxSimulateResultMessage {
+                correlation_id: envelope.correlation_id,
+                success: false,
+                compute_units_consumed: 0,
+                error_message: format!("Unauthorised service identity: {}", envelope.service_identity),
+                logs: vec![],
+            };
+            let payload = serde_json::to_vec(&result_msg).unwrap();
+            self.jetstream.publish(envelope.reply_subject, payload.into()).await.ok();
             let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
             return;
         }
@@ -600,6 +620,12 @@ impl NatsConsumer {
         if role == ServiceRole::Unknown {
             warn!("🚨 Unauthorised NATS cancel identity: {}", envelope.service_identity);
             self.audit_rejection(&envelope.correlation_id, &envelope.service_identity, "cancel", "rbac", "unknown service role".to_string()).await;
+            // Reply with an explicit error — see handle_submit's RBAC branch.
+            self.publish_cancel_result(&envelope.reply_subject, TxCancelResultMessage {
+                correlation_id: envelope.correlation_id,
+                success: false,
+                error: Some(format!("Unauthorised service identity: {}", envelope.service_identity)),
+            }).await;
             let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
             return;
         }
