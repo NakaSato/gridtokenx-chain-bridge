@@ -35,7 +35,10 @@ impl AuditHash {
 pub enum AuditOutcome {
     /// Passed policy + simulation and was submitted.
     Submitted { signature: String, slot: u64 },
-    /// Rejected before signing. `stage` is `policy` | `simulation` | `auth`.
+    /// Rejected before signing. `stage` is `policy` | `simulation` | `auth` |
+    /// `rbac` | `stale`. For `auth`/`rbac` rejections on the NATS path the
+    /// entry's `identity` is the envelope's *claimed* (unverified)
+    /// `service_identity`.
     Rejected { stage: String, reason: String },
 }
 

@@ -468,6 +468,44 @@
     }
 
     #[tokio::test]
+    async fn test_record_audit_carries_action_and_stage() {
+        // The NATS consumer audits pre-pipeline rejections via record_audit
+        // with the subject kind as `action` and a stage like `rbac`. The
+        // stored entry must carry both, plus the claimed identity, verbatim.
+        let store = Arc::new(chain_bridge_persistence::InMemoryAuditStore::new());
+        let service = create_test_service().with_audit(store.clone());
+
+        let identity = gridtokenx_blockchain_core::auth::SpiffeIdentity(
+            "spiffe://gridtokenx.th/prod/unknown-service".to_string(),
+        );
+        service
+            .record_audit(
+                "corr-nats-1",
+                &identity,
+                "cancel",
+                chain_bridge_core::audit::AuditOutcome::Rejected {
+                    stage: "rbac".to_string(),
+                    reason: "unknown service role".to_string(),
+                },
+            )
+            .await;
+
+        let entries = store.entries().await;
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e.action, "cancel");
+        assert_eq!(e.correlation_id, "corr-nats-1");
+        assert_eq!(e.identity, "spiffe://gridtokenx.th/prod/unknown-service");
+        match &e.outcome {
+            chain_bridge_core::audit::AuditOutcome::Rejected { stage, reason } => {
+                assert_eq!(stage, "rbac");
+                assert_eq!(reason, "unknown service role");
+            }
+            other => panic!("expected Rejected outcome, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn test_presign_simulation_rejects_before_signing() {
         // A doomed transaction (sim returns a tx-level error) must be rejected
         // before the Vault signing operation, and audited at stage="simulation".

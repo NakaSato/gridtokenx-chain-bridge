@@ -18,6 +18,7 @@ pub(crate) use gridtokenx_blockchain_core::rpc::nats_schema::{
 };
 pub(crate) use gridtokenx_blockchain_core::rpc::metrics::BlockchainMetrics;
 pub(crate) use gridtokenx_blockchain_core::auth::{ServiceRole, SpiffeIdentity};
+pub(crate) use chain_bridge_core::audit::AuditOutcome;
 pub(crate) use crate::api::ChainBridgeGrpcService;
 pub(crate) use solana_sdk::transaction::Transaction;
 pub(crate) use solana_sdk::signature::Signature;

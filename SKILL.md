@@ -119,9 +119,10 @@ NATS is for fire-and-forget or async reply patterns. The shape in `src/nats_cons
    3. RBAC: `ServiceRole::from(&SpiffeIdentity(envelope.service_identity))`. `Unknown` → `Term` ack.
    4. Idempotency: check `self.idempotency_cache`. If hit, plain `ack` and return — the caller already got a reply last time.
    5. Staleness: reject if `now_ms - envelope.created_at_ms > 55_000`. The Solana blockhash window is ~60s, so anything older than 55s is likely to fail anyway; fail fast with a clear error instead of burning RPC. `created_at_ms` is inside the signed canonical bytes, so this also bounds replay of captured signed envelopes.
-5. **Use `tokio_retry` only for transient failures** (Solana RPC flakes, node-behind). Don't retry deserialization failures, auth failures, or stale messages.
-6. **Publish the result to `envelope.reply_subject`.** Both success and failure paths must publish — the caller is awaiting it.
-7. **Always `ack` the message** once you've published a result (success or failure). `Term` only for malformed/unauthenticated messages that should never be retried.
+5. **Audit every rejection.** Each check that rejects (auth, RBAC, staleness, policy) must call `self.audit_rejection(correlation_id, service_identity, action, stage, reason)` so the denial lands in the tamper-evident audit hash-chain (same `AuditPort` the gRPC path uses; for `auth`/`rbac` the recorded identity is the *claimed*, unverified one). Best-effort — a failed append never blocks the rejection.
+6. **Use `tokio_retry` only for transient failures** (Solana RPC flakes, node-behind). Don't retry deserialization failures, auth failures, or stale messages.
+7. **Publish the result to `envelope.reply_subject`.** Both success and failure paths must publish — the caller is awaiting it.
+8. **Always `ack` the message** once you've published a result (success or failure). `Term` only for malformed/unauthenticated messages that should never be retried.
 
 ### The DLQ is currently advisory, not recovery
 

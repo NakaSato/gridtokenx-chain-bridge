@@ -129,6 +129,11 @@ impl InMemoryAuditStore {
     pub async fn is_empty(&self) -> bool {
         self.inner.lock().await.is_empty()
     }
+
+    /// Snapshot of the stored entries, oldest first (test/diagnostic helper).
+    pub async fn entries(&self) -> Vec<AuditEntry> {
+        self.inner.lock().await.iter().map(|(_, _, e)| e.clone()).collect()
+    }
 }
 
 #[async_trait]

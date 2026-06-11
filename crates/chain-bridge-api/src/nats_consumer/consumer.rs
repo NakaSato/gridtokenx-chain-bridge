@@ -177,6 +177,30 @@ impl NatsConsumer {
         }
     }
 
+    /// Append a `Rejected` entry to the tamper-evident audit chain for a
+    /// pre-pipeline NATS rejection (envelope auth, RBAC, staleness, policy,
+    /// key authorization). `claimed_identity` is the envelope's self-asserted
+    /// `service_identity` — for stage `auth`/`rbac` it is by definition
+    /// unverified. Best-effort like every audit append; a failed append is
+    /// logged inside `record_audit` and never blocks the rejection itself.
+    async fn audit_rejection(
+        &self,
+        correlation_id: &str,
+        claimed_identity: &str,
+        action: &str,
+        stage: &str,
+        reason: String,
+    ) {
+        self.signing_service
+            .record_audit(
+                correlation_id,
+                &SpiffeIdentity(claimed_identity.to_string()),
+                action,
+                AuditOutcome::Rejected { stage: stage.to_string(), reason },
+            )
+            .await;
+    }
+
     /// Effect-level dedup decision for the stable `idempotency_key`.
     ///
     /// Returns `Some(result)` when the caller must **short-circuit** — replay a
@@ -264,11 +288,13 @@ impl NatsConsumer {
             &envelope.correlation_id,
         ) {
             self.metrics.track_operation("nats_auth_rejected", 0.0, false);
+            let reason = format!("envelope authentication failed: {}", reason);
+            self.audit_rejection(&envelope.correlation_id, &envelope.service_identity, "submit", "auth", reason.clone()).await;
             self.publish_result(&envelope.reply_subject, TxResultMessage {
                 correlation_id: envelope.correlation_id,
                 success: false,
                 signature: None,
-                error: Some(format!("envelope authentication failed: {}", reason)),
+                error: Some(reason),
                 slot: 0,
                 deduplicated: false,
             }).await;
@@ -280,6 +306,7 @@ impl NatsConsumer {
         let role = ServiceRole::from(&SpiffeIdentity(envelope.service_identity.clone()));
         if role == ServiceRole::Unknown {
             warn!("🚨 Unauthorised NATS service identity: {}", envelope.service_identity);
+            self.audit_rejection(&envelope.correlation_id, &envelope.service_identity, "submit", "rbac", "unknown service role".to_string()).await;
             let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
             return;
         }
@@ -301,6 +328,7 @@ impl NatsConsumer {
         if age_ms > 55_000 {
             warn!("Rejecting stale tx {}: age {}ms", envelope.correlation_id, age_ms);
             self.metrics.track_operation("nats_submit_stale_rejected", 0.0, false);
+            self.audit_rejection(&envelope.correlation_id, &envelope.service_identity, "submit", "stale", format!("stale envelope: age {}ms", age_ms)).await;
             self.publish_result(&envelope.reply_subject, TxResultMessage {
                 correlation_id: envelope.correlation_id,
                 success: false,
@@ -334,6 +362,7 @@ impl NatsConsumer {
 
         if let Err(e) = gridtokenx_blockchain_core::policy::PolicyEngine::validate_transaction(&SpiffeIdentity(envelope.service_identity.clone()), &transaction) {
             warn!("Policy Engine rejection in NATS submit for {}: {}", envelope.correlation_id, e);
+            self.audit_rejection(&envelope.correlation_id, &envelope.service_identity, "submit", "policy", e.to_string()).await;
             self.publish_result(&envelope.reply_subject, TxResultMessage {
                 correlation_id: envelope.correlation_id,
                 success: false,
@@ -348,6 +377,7 @@ impl NatsConsumer {
 
         if envelope.key_id != "platform_admin" && !envelope.key_id.is_empty() {
             warn!("Key ID not authorized in NATS submit for {}: {}", envelope.correlation_id, envelope.key_id);
+            self.audit_rejection(&envelope.correlation_id, &envelope.service_identity, "submit", "auth", format!("Key ID not authorized: {}", envelope.key_id)).await;
             self.publish_result(&envelope.reply_subject, TxResultMessage {
                 correlation_id: envelope.correlation_id,
                 success: false,
@@ -451,11 +481,13 @@ impl NatsConsumer {
             &envelope.correlation_id,
         ) {
             self.metrics.track_operation("nats_auth_rejected", 0.0, false);
+            let reason = format!("envelope authentication failed: {}", reason);
+            self.audit_rejection(&envelope.correlation_id, &envelope.service_identity, "simulate", "auth", reason.clone()).await;
             let result_msg = TxSimulateResultMessage {
                 correlation_id: envelope.correlation_id,
                 success: false,
                 compute_units_consumed: 0,
-                error_message: format!("envelope authentication failed: {}", reason),
+                error_message: reason,
                 logs: vec![],
             };
             let payload = serde_json::to_vec(&result_msg).unwrap();
@@ -468,6 +500,7 @@ impl NatsConsumer {
         let role = ServiceRole::from(&SpiffeIdentity(envelope.service_identity.clone()));
         if role == ServiceRole::Unknown {
             warn!("🚨 Unauthorised NATS simulate identity: {}", envelope.service_identity);
+            self.audit_rejection(&envelope.correlation_id, &envelope.service_identity, "simulate", "rbac", "unknown service role".to_string()).await;
             let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
             return;
         }
@@ -481,6 +514,7 @@ impl NatsConsumer {
             .as_millis() as u64;
         if now_ms.saturating_sub(envelope.created_at_ms) > 55_000 {
             warn!("Rejecting stale simulate request: {}", envelope.correlation_id);
+            self.audit_rejection(&envelope.correlation_id, &envelope.service_identity, "simulate", "stale", "stale simulate request".to_string()).await;
             let result_msg = TxSimulateResultMessage {
                 correlation_id: envelope.correlation_id,
                 success: false,
@@ -550,10 +584,12 @@ impl NatsConsumer {
             &envelope.correlation_id,
         ) {
             self.metrics.track_operation("nats_auth_rejected", 0.0, false);
+            let reason = format!("envelope authentication failed: {}", reason);
+            self.audit_rejection(&envelope.correlation_id, &envelope.service_identity, "cancel", "auth", reason.clone()).await;
             self.publish_cancel_result(&envelope.reply_subject, TxCancelResultMessage {
                 correlation_id: envelope.correlation_id,
                 success: false,
-                error: Some(format!("envelope authentication failed: {}", reason)),
+                error: Some(reason),
             }).await;
             let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
             return;
@@ -563,6 +599,7 @@ impl NatsConsumer {
         let role = ServiceRole::from(&SpiffeIdentity(envelope.service_identity.clone()));
         if role == ServiceRole::Unknown {
             warn!("🚨 Unauthorised NATS cancel identity: {}", envelope.service_identity);
+            self.audit_rejection(&envelope.correlation_id, &envelope.service_identity, "cancel", "rbac", "unknown service role".to_string()).await;
             let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
             return;
         }
@@ -582,6 +619,7 @@ impl NatsConsumer {
         
         if now_ms.saturating_sub(envelope.created_at_ms) > 55_000 {
             warn!("Rejecting stale cancellation: {}", envelope.correlation_id);
+            self.audit_rejection(&envelope.correlation_id, &envelope.service_identity, "cancel", "stale", "stale cancellation request".to_string()).await;
             self.publish_cancel_result(&envelope.reply_subject, TxCancelResultMessage {
                 correlation_id: envelope.correlation_id,
                 success: false,

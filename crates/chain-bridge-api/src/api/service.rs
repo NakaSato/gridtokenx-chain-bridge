@@ -44,18 +44,21 @@ impl ChainBridgeGrpcService {
     /// Append one audit entry. Best-effort: a failed append is logged but does
     /// NOT fail the mediated effect (audit is observability, not a gate).
     /// `correlation_id` ties the entry to the originating NATS envelope; the
-    /// gRPC path has no envelope id and passes "".
-    async fn record_audit(
+    /// gRPC path has no envelope id and passes "". `action` is
+    /// `sign_and_submit` for the signing pipeline; the NATS consumer passes its
+    /// subject kind (`submit`/`simulate`/`cancel`) for pre-pipeline rejections.
+    pub(crate) async fn record_audit(
         &self,
         correlation_id: &str,
         identity: &gridtokenx_blockchain_core::auth::SpiffeIdentity,
+        action: &str,
         outcome: AuditOutcome,
     ) {
         let created_at_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let entry = AuditEntry::new(correlation_id, identity.0.clone(), "sign_and_submit", outcome, created_at_ms);
+        let entry = AuditEntry::new(correlation_id, identity.0.clone(), action, outcome, created_at_ms);
         if let Err(e) = self.audit.append(entry).await {
             warn!("⚠️ audit append failed (effect still applied): {}", e);
         }
@@ -113,6 +116,7 @@ impl ChainBridgeGrpcService {
             self.record_audit(
                 correlation_id,
                 identity,
+                "sign_and_submit",
                 AuditOutcome::Rejected { stage: "policy".to_string(), reason: reason.clone() },
             )
             .await;
@@ -154,6 +158,7 @@ impl ChainBridgeGrpcService {
                         self.record_audit(
                             correlation_id,
                             identity,
+                            "sign_and_submit",
                             AuditOutcome::Rejected {
                                 stage: "simulation".to_string(),
                                 reason: reason.clone(),
@@ -203,6 +208,7 @@ impl ChainBridgeGrpcService {
             self.record_audit(
                 correlation_id,
                 identity,
+                "sign_and_submit",
                 AuditOutcome::Rejected {
                     stage: "auth".to_string(),
                     reason: format!("Key ID not authorized: {}", key_id),
@@ -218,6 +224,7 @@ impl ChainBridgeGrpcService {
                 self.record_audit(
                     correlation_id,
                     identity,
+                    "sign_and_submit",
                     AuditOutcome::Rejected { stage: "submit".to_string(), reason: e.to_string() },
                 )
                 .await;
@@ -228,6 +235,7 @@ impl ChainBridgeGrpcService {
         self.record_audit(
             correlation_id,
             identity,
+            "sign_and_submit",
             AuditOutcome::Submitted { signature: sig.to_string(), slot: 0 },
         )
         .await;
