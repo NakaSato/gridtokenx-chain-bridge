@@ -47,10 +47,14 @@ impl NatsConsumer {
             }
             AuthCheck::Unsigned => {
                 warn!(
-                    "⚠️ Unsigned NATS envelope from '{}' ({}) — accepted {} signing enforcement",
+                    "⚠️ Unsigned NATS envelope from '{}' ({}) — {}",
                     claimed_identity,
                     correlation_id,
-                    if self.auth_policy.require_signed { "pending" } else { "without" },
+                    if self.auth_policy.require_signed {
+                        "rejecting (signing required)"
+                    } else {
+                        "accepted without signing enforcement"
+                    },
                 );
                 self.metrics.track_operation("nats_auth_unsigned", 0.0, true);
             }
