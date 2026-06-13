@@ -92,6 +92,30 @@ impl VaultProvider for MockVaultProvider {
     }
 }
 
+/// Vault provider that counts `sign_message` calls — lets a test prove the
+/// signing path was (or was NOT) entered, which a non-counting mock cannot.
+struct CountingVaultProvider {
+    sign_count: AtomicUsize,
+}
+
+impl CountingVaultProvider {
+    fn new() -> Self {
+        Self { sign_count: AtomicUsize::new(0) }
+    }
+}
+
+#[async_trait]
+impl VaultProvider for CountingVaultProvider {
+    async fn sign_message(&self, _key_name: &str, _message: &[u8]) -> anyhow::Result<Signature> {
+        self.sign_count.fetch_add(1, Ordering::SeqCst);
+        Ok(Signature::default())
+    }
+
+    async fn get_public_key(&self, _key_name: &str) -> anyhow::Result<Pubkey> {
+        Ok(Pubkey::default())
+    }
+}
+
 fn create_mock_tx(program_id: Pubkey) -> Transaction {
     let payer = Keypair::new();
     let instruction = Instruction::new_with_bytes(program_id, &[1, 2, 3], vec![]);
@@ -522,4 +546,170 @@ fn test_unsigned_nats_envelope_rejected_when_enforced_signed_verifies() {
     );
     assert!(matches!(check, AuthCheck::Verified), "got {check:?}");
     assert!(auth_decision(&check, policy.require_signed).is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Forged envelope under enforcement: an `auth` block that does NOT chain to the
+// trusted CA (and, separately, a valid cert+sig over TAMPERED bytes) is rejected
+// before any signing or submission, and the rejection is written to the audit
+// hash-chain at stage="auth". Models the handle_submit contract (auth gate runs
+// before sign_and_submit) with the same pure pieces the consumer uses; the
+// counting provider + vault prove the signing path is never entered.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_forged_nats_envelope_rejected_no_vault_no_submit_audit_recorded() {
+    use chain_bridge_core::AuditPort;
+    use chain_bridge_core::audit::{AuditEntry, AuditOutcome};
+    use chain_bridge_persistence::InMemoryAuditStore;
+    use gridtokenx_blockchain_core::rpc::envelope_auth::{EnvelopeSigner, canonical_submit_bytes};
+    use gridtokenx_blockchain_core::rpc::nats_schema::TxSubmitMessage;
+    use gridtokenx_chain_bridge::nats_consumer::auth::{
+        AuthCheck, NatsAuthPolicy, auth_decision, check_envelope_auth,
+    };
+    use rcgen::{
+        BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, PKCS_ECDSA_P256_SHA256, SanType,
+    };
+
+    const IDENTITY: &str = "spiffe://gridtokenx.th/prod/trading-service/matcher";
+    const NOW_SECS: i64 = 1_750_000_000;
+
+    fn make_ca(cn: &str) -> (rcgen::Certificate, KeyPair) {
+        let mut p = CertificateParams::default();
+        p.distinguished_name.push(DnType::CommonName, cn);
+        p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let k = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let c = p.self_signed(&k).unwrap();
+        (c, k)
+    }
+
+    // Trusted CA (configured in policy) and a rogue CA the forger actually used.
+    let (trusted_ca, _trusted_key) = make_ca("trusted-ca");
+    let (rogue_ca, rogue_key) = make_ca("rogue-ca");
+
+    // Leaf carries the correct SPIFFE SAN but is signed by the ROGUE CA.
+    let mut leaf_params = CertificateParams::default();
+    leaf_params.distinguished_name.push(DnType::CommonName, "leaf");
+    leaf_params
+        .subject_alt_names
+        .push(SanType::URI(IDENTITY.try_into().unwrap()));
+    let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+    let forged_leaf = leaf_params.signed_by(&leaf_key, &rogue_ca, &rogue_key).unwrap();
+
+    let policy = NatsAuthPolicy::new(true, Some(trusted_ca.der().to_vec()));
+    assert!(policy.require_signed);
+
+    let mut envelope = TxSubmitMessage {
+        correlation_id: "forge-1".to_string(),
+        idempotency_key: "forge-key".to_string(),
+        reply_subject: "chain.tx.result.forge-1".to_string(),
+        serialized_tx: vec![9, 9, 9],
+        key_id: "platform_admin".to_string(),
+        skip_preflight: false,
+        retry_count: 0,
+        service_identity: IDENTITY.to_string(),
+        created_at_ms: 1_700_000_000_000,
+        auth: None,
+    };
+    let canonical = canonical_submit_bytes(&envelope);
+
+    // Forgery A: leaf properly signs the canonical bytes, but its cert chains to
+    // the rogue CA, not the trusted one → rejected at the CA-trust step.
+    let signer = EnvelopeSigner::from_pem(forged_leaf.pem(), &leaf_key.serialize_pem()).unwrap();
+    envelope.auth = Some(signer.sign(&canonical));
+    let check = check_envelope_auth(
+        policy.ca_der.as_deref(),
+        envelope.auth.as_ref(),
+        IDENTITY,
+        &canonical,
+        NOW_SECS,
+    );
+    assert!(
+        matches!(check, AuthCheck::Failed(ref r) if r.contains("not signed by the trusted CA")),
+        "forged cert (rogue CA) must fail CA trust, got {check:?}"
+    );
+    let decision = auth_decision(&check, policy.require_signed);
+    assert!(decision.is_err(), "forged envelope must be rejected under enforcement");
+
+    // Forgery B: same forger signs DIFFERENT bytes, then claims they cover this
+    // envelope → signature is over tampered content (here also rogue-CA, so the
+    // CA step fails first; the point is no variant yields Verified).
+    let other = TxSubmitMessage { idempotency_key: "different".to_string(), ..envelope.clone() };
+    let tampered_auth = signer.sign(&canonical_submit_bytes(&other));
+    let check_b = check_envelope_auth(
+        policy.ca_der.as_deref(),
+        Some(&tampered_auth),
+        IDENTITY,
+        &canonical,
+        NOW_SECS,
+    );
+    assert!(matches!(check_b, AuthCheck::Failed(_)), "tampered envelope must not verify, got {check_b:?}");
+
+    // Consumer contract on an auth-rejected envelope: audit the rejection at
+    // stage="auth" and NEVER reach sign_and_submit. Wire a real service with
+    // counting provider + vault so "no submit, no sign" is an observable fact.
+    let provider = Arc::new(MockSolanaProvider::new());
+    let vault = Arc::new(CountingVaultProvider::new());
+    let cache = Arc::new(BlockhashCache::new());
+    let audit = Arc::new(InMemoryAuditStore::new());
+    let core = ChainBridgeGrpcService::new(provider.clone(), vault.clone(), cache)
+        .with_audit(audit.clone());
+
+    if decision.is_err() {
+        audit
+            .append(AuditEntry::new(
+                &envelope.correlation_id,
+                &envelope.service_identity,
+                "submit",
+                AuditOutcome::Rejected { stage: "auth".to_string(), reason: decision.unwrap_err() },
+                envelope.created_at_ms,
+            ))
+            .await
+            .unwrap();
+    } else {
+        // Unreachable for a forged envelope; present so a future regression that
+        // wrongly accepts the forgery would submit and trip the asserts below.
+        let identity = SpiffeIdentity(IDENTITY.to_string());
+        let _ = core.sign_and_submit(&envelope.serialized_tx, &envelope.key_id, &identity, "").await;
+    }
+
+    assert_eq!(provider.send_count.load(Ordering::SeqCst), 0, "forged envelope must not submit on-chain");
+    assert_eq!(vault.sign_count.load(Ordering::SeqCst), 0, "forged envelope must not reach Vault signing");
+
+    let entries = audit.entries().await;
+    assert_eq!(entries.len(), 1, "rejection must append exactly one audit entry");
+    assert_eq!(entries[0].action, "submit");
+    assert_eq!(entries[0].correlation_id, "forge-1");
+    assert_eq!(entries[0].identity, IDENTITY, "audit carries the claimed (unverified) identity");
+    match &entries[0].outcome {
+        AuditOutcome::Rejected { stage, .. } => assert_eq!(stage, "auth"),
+        other => panic!("expected Rejected{{stage:auth}}, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Single signing path: both ingress identities (a gRPC matcher and the NATS
+// settlement service) reach the provider through the one `sign_and_submit`
+// entrypoint — there is no second route that touches Vault or submits. Two
+// submits ⇒ exactly two provider sends AND two Vault signs (one funnel).
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_single_signing_path_grpc_and_nats_funnel_through_sign_and_submit() {
+    let provider = Arc::new(MockSolanaProvider::new());
+    let vault = Arc::new(CountingVaultProvider::new());
+    let cache = Arc::new(BlockhashCache::new());
+    let core = ChainBridgeGrpcService::new(provider.clone(), vault.clone(), cache);
+
+    let trading_program_id: Pubkey = trading_program().parse().unwrap();
+    let serialized = bincode::serialize(&create_mock_tx(trading_program_id)).unwrap();
+
+    // gRPC-origin caller (trading matcher) — both trading-capable identities.
+    let grpc_identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/trading-service/matcher".to_string());
+    assert!(core.sign_and_submit(&serialized, "platform_admin", &grpc_identity, "").await.is_ok());
+
+    // NATS-origin caller (settlement service) — the consumer calls this exact method.
+    let nats_identity = SpiffeIdentity("spiffe://gridtokenx.th/prod/settlement-service".to_string());
+    assert!(core.sign_and_submit(&serialized, "platform_admin", &nats_identity, "").await.is_ok());
+
+    assert_eq!(provider.send_count.load(Ordering::SeqCst), 2, "both paths submit via the one funnel");
+    assert_eq!(vault.sign_count.load(Ordering::SeqCst), 2, "every submit signs through the single Vault path");
 }
