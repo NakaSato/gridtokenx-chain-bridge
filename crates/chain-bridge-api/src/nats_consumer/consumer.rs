@@ -500,8 +500,7 @@ impl NatsConsumer {
                 error_message: reason,
                 logs: vec![],
             };
-            let payload = serde_json::to_vec(&result_msg).unwrap();
-            self.jetstream.publish(envelope.reply_subject, payload.into()).await.ok();
+            self.publish_simulate_result(&envelope.reply_subject, result_msg).await;
             let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
             return;
         }
@@ -519,8 +518,7 @@ impl NatsConsumer {
                 error_message: format!("Unauthorised service identity: {}", envelope.service_identity),
                 logs: vec![],
             };
-            let payload = serde_json::to_vec(&result_msg).unwrap();
-            self.jetstream.publish(envelope.reply_subject, payload.into()).await.ok();
+            self.publish_simulate_result(&envelope.reply_subject, result_msg).await;
             let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
             return;
         }
@@ -542,8 +540,7 @@ impl NatsConsumer {
                 error_message: "Simulate request stale".to_string(),
                 logs: vec![],
             };
-            let payload = serde_json::to_vec(&result_msg).unwrap();
-            self.jetstream.publish(envelope.reply_subject, payload.into()).await.ok();
+            self.publish_simulate_result(&envelope.reply_subject, result_msg).await;
             let _ = msg.ack().await;
             return;
         }
@@ -578,8 +575,7 @@ impl NatsConsumer {
             },
         };
 
-        let payload = serde_json::to_vec(&result_msg).unwrap();
-        self.jetstream.publish(envelope.reply_subject, payload.into()).await.ok();
+        self.publish_simulate_result(&envelope.reply_subject, result_msg).await;
         let _ = msg.ack().await;
     }
 
@@ -676,16 +672,41 @@ impl NatsConsumer {
     }
 
     async fn publish_result(&self, subject: &str, result: TxResultMessage) {
-        let payload = serde_json::to_vec(&result).unwrap();
+        let payload = match serde_json::to_vec(&result) {
+            Ok(p) => p,
+            Err(e) => {
+                error!("Failed to serialize result for {}: {}", subject, e);
+                return;
+            }
+        };
         if let Err(e) = self.jetstream.publish(subject.to_string(), payload.into()).await {
             error!("Failed to publish result to {}: {}", subject, e);
         }
     }
 
     async fn publish_cancel_result(&self, subject: &str, result: TxCancelResultMessage) {
-        let payload = serde_json::to_vec(&result).unwrap();
+        let payload = match serde_json::to_vec(&result) {
+            Ok(p) => p,
+            Err(e) => {
+                error!("Failed to serialize cancel result for {}: {}", subject, e);
+                return;
+            }
+        };
         if let Err(e) = self.jetstream.publish(subject.to_string(), payload.into()).await {
             error!("Failed to publish cancel result to {}: {}", subject, e);
+        }
+    }
+
+    async fn publish_simulate_result(&self, subject: &str, result: TxSimulateResultMessage) {
+        let payload = match serde_json::to_vec(&result) {
+            Ok(p) => p,
+            Err(e) => {
+                error!("Failed to serialize simulate result for {}: {}", subject, e);
+                return;
+            }
+        };
+        if let Err(e) = self.jetstream.publish(subject.to_string(), payload.into()).await {
+            error!("Failed to publish simulate result to {}: {}", subject, e);
         }
     }
 

@@ -81,11 +81,16 @@ impl SolanaProvider for RealSolanaProvider {
         self.client.get_recent_prioritization_fees(pubkeys).await
     }
     async fn get_token_account_balance(&self, pubkey: &Pubkey) -> Result<serde_json::Value, ClientError> {
-        self.client.get_token_account_balance(pubkey).await.map(|b| serde_json::to_value(b).unwrap())
+        let b = self.client.get_token_account_balance(pubkey).await?;
+        serde_json::to_value(b)
+            .map_err(|e| ClientErrorKind::Custom(format!("serialize token balance: {e}")).into())
     }
     async fn get_signature_statuses(&self, signatures: &[Signature]) -> Result<Response<Vec<Option<serde_json::Value>>>, ClientError> {
         let resp = self.client.get_signature_statuses(signatures).await?;
-        let value = resp.value.into_iter().map(|opt| opt.map(|s| serde_json::to_value(s).unwrap())).collect();
+        let value = resp.value.into_iter()
+            .map(|opt| opt.map(serde_json::to_value).transpose())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ClientErrorKind::Custom(format!("serialize signature status: {e}")))?;
         Ok(Response { context: resp.context, value })
     }
     async fn get_slot(&self) -> Result<u64, ClientError> {
@@ -95,14 +100,16 @@ impl SolanaProvider for RealSolanaProvider {
         self.client.request_airdrop(pubkey, lamports).await
     }
     async fn get_transaction(&self, signature: &Signature) -> Result<serde_json::Value, ClientError> {
-        self.client.get_transaction_with_config(
+        let tx = self.client.get_transaction_with_config(
             signature,
             solana_client::rpc_config::RpcTransactionConfig {
                 encoding: Some(solana_transaction_status::UiTransactionEncoding::Json),
                 commitment: Some(self.client.commitment()),
                 max_supported_transaction_version: Some(0),
             }
-        ).await.map(|tx| serde_json::to_value(tx).unwrap())
+        ).await?;
+        serde_json::to_value(tx)
+            .map_err(|e| ClientErrorKind::Custom(format!("serialize transaction: {e}")).into())
     }
     async fn get_epoch_info(&self) -> Result<solana_sdk::epoch_info::EpochInfo, ClientError> {
         let info = self.client.get_epoch_info().await?;

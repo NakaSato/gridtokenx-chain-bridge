@@ -45,7 +45,7 @@ pub(crate) use chain_v1::{
     PrioritizationFee,
 };
 
-pub(crate) use solana_client::client_error::ClientError;
+pub(crate) use solana_client::client_error::{ClientError, ClientErrorKind};
 pub(crate) use solana_client::nonblocking::rpc_client::RpcClient;
 pub(crate) use solana_client::rpc_response::{Response, RpcPrioritizationFee, RpcSimulateTransactionResult};
 pub(crate) use solana_sdk::account::Account;
