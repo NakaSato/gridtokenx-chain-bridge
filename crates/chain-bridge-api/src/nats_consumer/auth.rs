@@ -357,6 +357,32 @@ mod tests {
     }
 
     #[test]
+    fn tampered_tx_bytes_rejected() {
+        // Sign over the original tx, then swap serialized_tx. The canonical bytes
+        // bind the payload via tx_sha256 = SHA256(serialized_tx)
+        // (envelope_auth.rs canonical_submit_bytes), so a substituted transaction
+        // changes the digest and the P-256 signature no longer verifies — an
+        // attacker cannot reuse a captured envelope to push a different tx.
+        let (ca, ca_key) = make_test_ca();
+        let (leaf_pem, leaf_key) = make_leaf(IDENTITY, &ca, &ca_key);
+        let mut env = submit_fixture(IDENTITY);
+        let auth = signed_auth(&env, &leaf_pem, &leaf_key);
+
+        env.serialized_tx = vec![1, 2, 3, 4]; // != the signed [9, 9, 9]
+        let check = check_envelope_auth(
+            Some(ca.der()),
+            Some(&auth),
+            IDENTITY,
+            &canonical_submit_bytes(&env),
+            NOW_SECS,
+        );
+        assert!(
+            matches!(&check, AuthCheck::Failed(r) if r.contains("signature verification failed")),
+            "got {check:?}"
+        );
+    }
+
+    #[test]
     fn unknown_scheme_rejected() {
         let (ca, ca_key) = make_test_ca();
         let (leaf_pem, leaf_key) = make_leaf(IDENTITY, &ca, &ca_key);
