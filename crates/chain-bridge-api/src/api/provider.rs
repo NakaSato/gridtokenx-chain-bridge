@@ -46,7 +46,16 @@ pub struct RealSolanaProvider {
 impl RealSolanaProvider {
     pub fn new(rpc_url: String) -> Self {
         Self {
-            client: RpcClient::new(rpc_url),
+            // Read at `confirmed`, not the RpcClient default (`finalized`). Reads
+            // here back fresh-write confirmation (e.g. IAM polling a just-created
+            // user PDA): finalization lags ~13s+ on localnet and ~13s on mainnet,
+            // far longer than a caller's confirm window, so a finalized read makes
+            // a landed tx look dropped. `confirmed` is visible in ~1-2s and is the
+            // correct level for reads, blockhash, and tx lookups.
+            client: RpcClient::new_with_commitment(
+                rpc_url,
+                solana_sdk::commitment_config::CommitmentConfig::confirmed(),
+            ),
         }
     }
 }
