@@ -159,6 +159,41 @@
     }
 
     #[test]
+    fn test_dedup_keys_are_namespaced_by_effect_type() {
+        // F4 regression: handle_submit and handle_mint share one dedup_store but
+        // prefix the stable idempotency_key with "submit:" / "mint:". A submit's
+        // Done record must therefore NOT short-circuit a mint carrying the same
+        // raw idempotency_key (which would forge a mint success without minting).
+        let store: DashMap<String, DedupRecord> = DashMap::new();
+        let now = now_ms();
+        // A submit completed and recorded its effect under the submit namespace.
+        store.insert(
+            "submit:shared-key".to_string(),
+            DedupRecord {
+                expiry_ms: now + 120_000,
+                state: DedupState::Done { signature: Some("SUBMIT_SIG".to_string()), slot: 7 },
+            },
+        );
+
+        // A mint with the SAME raw idempotency_key queries under "mint:" and must
+        // see no prior effect — it claims InFlight and proceeds to a real mint.
+        let out = NatsConsumer::claim_or_replay(&store, Some("mint:shared-key"), "corr-mint", now);
+        assert!(
+            out.is_none(),
+            "a submit Done must not replay as a mint result across the shared store"
+        );
+        assert!(
+            matches!(store.get("mint:shared-key").unwrap().state, DedupState::InFlight),
+            "the mint must claim its own namespaced InFlight slot"
+        );
+        // The submit's record is untouched.
+        assert!(matches!(
+            store.get("submit:shared-key").unwrap().state,
+            DedupState::Done { .. }
+        ));
+    }
+
+    #[test]
     fn test_dedup_inflight_collision_is_rejected_not_resubmitted() {
         let store: DashMap<String, DedupRecord> = DashMap::new();
         let now = now_ms();

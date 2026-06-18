@@ -405,7 +405,11 @@ impl NatsConsumer {
 
         // 4.5 Effect-level dedup on the stable idempotency_key. Empty key =
         // legacy/unprotected caller -> skip (submit normally, no dedup).
-        let dedup_key = (!envelope.idempotency_key.is_empty()).then(|| envelope.idempotency_key.clone());
+        // Namespace by effect type: the dedup_store is shared with handle_mint,
+        // so an un-prefixed key would let a submit's Done record replay as a mint
+        // success (and vice versa). See F4.
+        let dedup_key = (!envelope.idempotency_key.is_empty())
+            .then(|| format!("submit:{}", envelope.idempotency_key));
         if let Some(result_msg) =
             Self::claim_or_replay(&self.dedup_store, dedup_key.as_deref(), &envelope.correlation_id, now_ms)
         {
@@ -765,7 +769,11 @@ impl NatsConsumer {
         }
 
         // 4. Effect-level dedup on the stable idempotency_key (empty = no dedup).
-        let dedup_key = (!envelope.idempotency_key.is_empty()).then(|| envelope.idempotency_key.clone());
+        // Namespace by effect type so a mint key can never collide with a submit
+        // key in the shared dedup_store (would otherwise replay a submit Done as a
+        // forged mint success). See F4.
+        let dedup_key = (!envelope.idempotency_key.is_empty())
+            .then(|| format!("mint:{}", envelope.idempotency_key));
         if let Some(prior) =
             Self::claim_or_replay(&self.dedup_store, dedup_key.as_deref(), &envelope.correlation_id, now_ms)
         {
