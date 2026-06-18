@@ -54,10 +54,7 @@ impl ChainBridgeGrpcService {
         action: &str,
         outcome: AuditOutcome,
     ) {
-        let created_at_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let created_at_ms = gridtokenx_telemetry::time::now().timestamp_millis() as u64;
         let entry = AuditEntry::new(correlation_id, identity.0.clone(), action, outcome, created_at_ms);
         if let Err(e) = self.audit.append(entry).await {
             warn!("⚠️ audit append failed (effect still applied): {}", e);
@@ -66,6 +63,147 @@ impl ChainBridgeGrpcService {
 
     pub fn provider(&self) -> Arc<dyn SolanaProvider> {
         self.provider.clone()
+    }
+
+    /// Look up the on-chain confirmation status of a submitted transaction.
+    ///
+    /// Shared read used by both the gRPC `get_signature_status` and the NATS
+    /// `chain.tx.status` handler. Returns `(found, confirmed, status, slot)`
+    /// where `status` is the Solana commitment string
+    /// (`processed`/`confirmed`/`finalized`) and `confirmed` means the tx landed
+    /// without an execution error.
+    ///
+    /// # Errors
+    /// Returns an error if the signature is malformed or the RPC call fails.
+    pub async fn signature_status(
+        &self,
+        signature: &str,
+    ) -> anyhow::Result<(bool, bool, String, u64)> {
+        let sig = Signature::from_str(signature)
+            .map_err(|e| anyhow::anyhow!("invalid signature: {e}"))?;
+        let resp = self
+            .provider
+            .get_signature_statuses(&[sig])
+            .await
+            .map_err(|e| anyhow::anyhow!("get_signature_statuses failed: {e}"))?;
+        if let Some(Some(status)) = resp.value.first() {
+            let confirmed = status["err"].is_null();
+            let conf_status = status["confirmation_status"]
+                .as_str()
+                .unwrap_or("processed")
+                .to_string();
+            let slot = status["slot"].as_u64().unwrap_or(0);
+            Ok((true, confirmed, conf_status, slot))
+        } else {
+            Ok((false, false, "NotFound".to_string(), 0))
+        }
+    }
+
+    /// Build, sign (Vault `platform_admin`), and submit an energy-token
+    /// generation mint. The bridge owns issuance — the caller sends only a
+    /// semantic intent (recipient, kWh, meter, window) and carries no Solana
+    /// types. Reuses [`sign_and_submit`](Self::sign_and_submit) for the
+    /// policy → pre-sign simulate → Vault sign → submit pipeline.
+    ///
+    /// Exactly-once is enforced on-chain: the energy-token mint-record PDA is
+    /// keyed by `(meter_id, window_start_ms)`, so a replay of the same window is
+    /// a no-op mint regardless of bridge-side state.
+    pub async fn build_and_submit_generation_mint(
+        &self,
+        recipient_wallet: &str,
+        energy_kwh: f64,
+        meter_id: &[u8; 16],
+        window_start_ms: i64,
+        identity: &gridtokenx_blockchain_core::auth::SpiffeIdentity,
+        correlation_id: &str,
+    ) -> anyhow::Result<(Signature, u64)> {
+        use gridtokenx_blockchain_core::config::SolanaProgramsConfig;
+        use gridtokenx_blockchain_core::rpc::instructions::InstructionBuilder;
+
+        // Validate + scale kWh → 9-decimal base units through the shared core
+        // helper, which also enforces the MAX_MINT_KWH cap. A bare
+        // `(kwh * 1e9) as u64` would *saturate* to u64::MAX for a huge value, so
+        // the cap is the load-bearing guard against an over-large mint.
+        let amount_atomic =
+            gridtokenx_blockchain_core::rpc::nats_schema::energy_kwh_to_base_units(energy_kwh)?;
+
+        let recipient = Pubkey::from_str(recipient_wallet)
+            .map_err(|e| anyhow::anyhow!("invalid recipient wallet '{recipient_wallet}': {e}"))?;
+
+        // Fee payer + mint authority = the bridge's Vault platform_admin pubkey,
+        // the same key sign_and_submit signs slot 0 with.
+        let payer = self
+            .vault
+            .get_public_key(&self.transit_key_name)
+            .await
+            .context("resolving bridge signer pubkey from Vault")?;
+
+        let builder = InstructionBuilder::new(payer, SolanaProgramsConfig::from_env());
+        let mut instructions = builder
+            .build_generation_mint_instructions(
+                payer,
+                recipient,
+                amount_atomic,
+                meter_id,
+                window_start_ms,
+            )
+            .map_err(|e| anyhow::anyhow!("building generation-mint instructions: {e:#}"))?;
+
+        // Size the compute budget for create-ATA (idempotent) + mint_to of one
+        // recipient; the flat token-minting default only marginally covers a
+        // first-time recipient.
+        instructions.insert(
+            0,
+            solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(400_000),
+        );
+
+        // Unsigned: sign_and_submit fills the blockhash and Vault-signs slot 0.
+        let message = solana_sdk::message::Message::new(&instructions, Some(&payer));
+        let transaction = Transaction::new_unsigned(message);
+        let serialized =
+            bincode::serialize(&transaction).map_err(|e| anyhow::anyhow!("serializing mint tx: {e}"))?;
+
+        let (sig, _) = self
+            .sign_and_submit(&serialized, "platform_admin", identity, correlation_id)
+            .await?;
+
+        // `sign_and_submit` submits fire-and-forget and returns slot 0 (it never
+        // waits for confirmation). The mint is provenance-critical and low-rate, so
+        // here — unlike the generic submit path — confirm the signature and resolve
+        // the real on-chain slot for the meter-service tracking column. Best-effort:
+        // if confirmation does not land within the bounded window, return slot 0 and
+        // let the chain confirmer backfill finality later.
+        let slot = self.resolve_confirmed_slot(&sig).await;
+        Ok((sig, slot))
+    }
+
+    /// Polls signature status to resolve the confirmed slot of a just-submitted
+    /// transaction at `confirmed` commitment. Returns the slot once visible, or 0
+    /// if the tx does not confirm within the bounded window (or lands with an
+    /// on-chain error). Localnet/`confirmed` typically resolves in ~1-2s.
+    async fn resolve_confirmed_slot(&self, sig: &Signature) -> u64 {
+        // ~6s budget (24 × 250ms) — comfortably above confirmed-commitment latency
+        // without blocking the mint reply indefinitely on a stalled validator.
+        for _ in 0..24 {
+            if let Ok(resp) = self
+                .provider
+                .get_signature_statuses(std::slice::from_ref(sig))
+                .await
+            {
+                if let Some(Some(status)) = resp.value.first() {
+                    // A landed-but-failed tx has no slot worth recording.
+                    let errored = status.get("err").map(|e| !e.is_null()).unwrap_or(false);
+                    if errored {
+                        return 0;
+                    }
+                    if let Some(slot) = status.get("slot").and_then(serde_json::Value::as_u64) {
+                        return slot;
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        0
     }
 
     pub(crate) fn extract_role(&self, ctx: &Context) -> ServiceRole {

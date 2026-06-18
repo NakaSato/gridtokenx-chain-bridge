@@ -115,7 +115,7 @@ otherwise `RealSolanaProvider` runs against `SOLANA_RPC_URL`.
 
 ### Bind address
 
-`main.rs` binds **`0.0.0.0:<CHAIN_BRIDGE_GRPC_PORT>`** (`crates/chain-bridge-api/src/main.rs:150`).
+`main.rs` binds **`0.0.0.0:<CHAIN_BRIDGE_GRPC_PORT>`** (`crates/chain-bridge-api/src/main.rs:159`).
 The superproject doc claims "127.0.0.1 only"; the code binds `0.0.0.0`. Confirm intent before changing
 the bind.
 

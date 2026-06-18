@@ -19,7 +19,14 @@ impl NatsConsumer {
 
     /// Verify one envelope's [`EnvelopeAuth`] and decide whether to proceed.
     ///
-    /// `Err(reason)` ⇒ reject (only possible when `require_signed` is on).
+    /// `Err(reason)` ⇒ reject. Rejection happens when the global signing policy
+    /// (`require_signed`) is on **or** the caller passes `force_signed = true`.
+    /// `force_signed` exists for value-moving subjects (e.g. `chain.tx.mint`)
+    /// that must never run on a self-asserted identity, regardless of the
+    /// log-only global default — an unsigned mint would let any publisher forge
+    /// tokens to any wallet. Note: a forced-signed subject with no CA configured
+    /// fails closed (no CA ⇒ nothing can be verified ⇒ reject), which is the
+    /// correct posture for a mint.
     /// All three outcomes are logged/metered so log-only mode still surfaces
     /// unsigned publishers (`nats_auth_unsigned`) and broken signatures
     /// (`nats_auth_failed`) before enforcement is flipped on.
@@ -29,11 +36,10 @@ impl NatsConsumer {
         claimed_identity: &str,
         canonical: &[u8],
         correlation_id: &str,
+        force_signed: bool,
     ) -> Result<(), String> {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let require_signed = self.auth_policy.require_signed || force_signed;
+        let now_secs = gridtokenx_telemetry::time::now().timestamp();
         let check = super::auth::check_envelope_auth(
             self.auth_policy.ca_der.as_deref(),
             auth,
@@ -50,7 +56,7 @@ impl NatsConsumer {
                     "⚠️ Unsigned NATS envelope from '{}' ({}) — {}",
                     claimed_identity,
                     correlation_id,
-                    if self.auth_policy.require_signed {
+                    if require_signed {
                         "rejecting (signing required)"
                     } else {
                         "accepted without signing enforcement"
@@ -66,7 +72,7 @@ impl NatsConsumer {
                 self.metrics.track_operation("nats_auth_failed", 0.0, false);
             }
         }
-        super::auth::auth_decision(&check, self.auth_policy.require_signed)
+        super::auth::auth_decision(&check, require_signed)
     }
 
     pub async fn start(self) -> anyhow::Result<()> {
@@ -98,10 +104,7 @@ impl NatsConsumer {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             loop {
                 interval.tick().await;
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
+                let now_ms = gridtokenx_telemetry::time::now().timestamp_millis() as u64;
                 cleanup_cache.retain(|_, &mut expiry| expiry > now_ms);
                 cleanup_dedup.retain(|_, rec| rec.expiry_ms > now_ms);
             }
@@ -159,6 +162,8 @@ impl NatsConsumer {
                                 "chain.tx.submit" => self_clone.handle_submit(msg).await,
                                 "chain.tx.simulate" => self_clone.handle_simulate(msg).await,
                                 "chain.tx.cancel" => self_clone.handle_cancel(msg).await,
+                                "chain.tx.mint" => self_clone.handle_mint(msg).await,
+                                "chain.tx.status" => self_clone.handle_status(msg).await,
                                 _ => {
                                     warn!("Unknown NATS subject: {}", msg.subject);
                                     let _ = msg.ack().await;
@@ -286,6 +291,7 @@ impl NatsConsumer {
             &envelope.service_identity,
             &canonical,
             &envelope.correlation_id,
+            false,
         ) {
             self.metrics.track_operation("nats_auth_rejected", 0.0, false);
             let reason = format!("envelope authentication failed: {}", reason);
@@ -329,10 +335,7 @@ impl NatsConsumer {
         }
 
         // 3. Staleness check (55s)
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let now_ms = gridtokenx_telemetry::time::now().timestamp_millis() as u64;
         
         let age_ms = now_ms.saturating_sub(envelope.created_at_ms);
         if age_ms > 55_000 {
@@ -489,6 +492,7 @@ impl NatsConsumer {
             &envelope.service_identity,
             &canonical,
             &envelope.correlation_id,
+            false,
         ) {
             self.metrics.track_operation("nats_auth_rejected", 0.0, false);
             let reason = format!("envelope authentication failed: {}", reason);
@@ -526,10 +530,7 @@ impl NatsConsumer {
         // Staleness check (55s) — created_at_ms is inside the signed canonical
         // bytes, so this bounds replay of captured signed envelopes (submit and
         // cancel already had it; simulate was the gap).
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let now_ms = gridtokenx_telemetry::time::now().timestamp_millis() as u64;
         if now_ms.saturating_sub(envelope.created_at_ms) > 55_000 {
             warn!("Rejecting stale simulate request: {}", envelope.correlation_id);
             self.audit_rejection(&envelope.correlation_id, &envelope.service_identity, "simulate", "stale", "stale simulate request".to_string()).await;
@@ -598,6 +599,7 @@ impl NatsConsumer {
             &envelope.service_identity,
             &canonical,
             &envelope.correlation_id,
+            false,
         ) {
             self.metrics.track_operation("nats_auth_rejected", 0.0, false);
             let reason = format!("envelope authentication failed: {}", reason);
@@ -634,10 +636,7 @@ impl NatsConsumer {
         }
 
         // 3. Staleness Check (55s)
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let now_ms = gridtokenx_telemetry::time::now().timestamp_millis() as u64;
         
         if now_ms.saturating_sub(envelope.created_at_ms) > 55_000 {
             warn!("Rejecting stale cancellation: {}", envelope.correlation_id);
@@ -669,6 +668,280 @@ impl NatsConsumer {
         self.metrics.track_operation("nats_consumer_cancel", start_time.elapsed().as_millis() as f64, true);
         self.publish_cancel_result(&envelope.reply_subject, result_msg).await;
         let _ = msg.ack().await;
+    }
+
+    /// Handle `chain.tx.mint` — a semantic energy-token generation-mint intent.
+    /// Unlike `handle_submit` (caller built the tx), the bridge BUILDS the mint
+    /// transaction here, then signs (Vault `platform_admin`) and submits. Mirrors
+    /// the submit pipeline: envelope auth → RBAC → idempotency → staleness →
+    /// effect dedup → build/sign/submit.
+    async fn handle_mint(&self, msg: async_nats::jetstream::Message) {
+        let start_time = std::time::Instant::now();
+        let envelope: MintEnergyMessage = match serde_json::from_slice(&msg.payload) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("Invalid payload on chain.tx.mint: {}", e);
+                let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
+                return;
+            }
+        };
+
+        // 0. Envelope authentication — precedes RBAC and any dedup claim.
+        let canonical =
+            gridtokenx_blockchain_core::rpc::envelope_auth::canonical_mint_bytes(&envelope);
+        // force_signed = true: minting is value-moving and must never run on a
+        // self-asserted identity, even when the global NATS signing policy is in
+        // log-only mode. Unsigned/forged mint = tokens to an attacker wallet.
+        if let Err(reason) = self.evaluate_envelope_auth(
+            envelope.auth.as_ref(),
+            &envelope.service_identity,
+            &canonical,
+            &envelope.correlation_id,
+            true,
+        ) {
+            self.metrics.track_operation("nats_auth_rejected", 0.0, false);
+            let reason = format!("envelope authentication failed: {}", reason);
+            self.audit_rejection(&envelope.correlation_id, &envelope.service_identity, "mint", "auth", reason.clone()).await;
+            self.publish_mint_result(&envelope.reply_subject, MintEnergyResultMessage {
+                correlation_id: envelope.correlation_id,
+                success: false,
+                signature: None,
+                error: Some(reason),
+                slot: 0,
+                deduplicated: false,
+            }).await;
+            let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
+            return;
+        }
+
+        // 1. RBAC — the generation-mint path is owned by the aggregator-bridge
+        // (surplus window flush publishes on chain.tx.mint); meter-service retains
+        // the legacy bridge-built mint. Both are gated again by the PolicyEngine
+        // inside sign_and_submit (program ids — see policy.rs AggregatorBridge arm).
+        let identity = SpiffeIdentity(envelope.service_identity.clone());
+        let role = ServiceRole::from(&identity);
+        if role
+            .require_any(&[ServiceRole::AggregatorBridge, ServiceRole::MeterService])
+            .is_err()
+        {
+            warn!("🚨 Unauthorised mint request from identity: {}", envelope.service_identity);
+            self.audit_rejection(&envelope.correlation_id, &envelope.service_identity, "mint", "rbac", "role not permitted to mint".to_string()).await;
+            self.publish_mint_result(&envelope.reply_subject, MintEnergyResultMessage {
+                correlation_id: envelope.correlation_id,
+                success: false,
+                signature: None,
+                error: Some(format!("Unauthorised service identity for mint: {}", envelope.service_identity)),
+                slot: 0,
+                deduplicated: false,
+            }).await;
+            let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
+            return;
+        }
+
+        // 2. Idempotency check (per-attempt correlation_id).
+        if self.idempotency_cache.contains_key(&envelope.correlation_id) {
+            warn!("Duplicate mint detected: {}", envelope.correlation_id);
+            let _ = msg.ack().await;
+            return;
+        }
+
+        // 3. Staleness check (55s).
+        let now_ms = gridtokenx_telemetry::time::now().timestamp_millis() as u64;
+        let age_ms = now_ms.saturating_sub(envelope.created_at_ms);
+        if age_ms > 55_000 {
+            warn!("Rejecting stale mint {}: age {}ms", envelope.correlation_id, age_ms);
+            self.metrics.track_operation("nats_mint_stale_rejected", 0.0, false);
+            self.audit_rejection(&envelope.correlation_id, &envelope.service_identity, "mint", "stale", format!("stale envelope: age {}ms", age_ms)).await;
+            self.publish_mint_result(&envelope.reply_subject, MintEnergyResultMessage {
+                correlation_id: envelope.correlation_id,
+                success: false,
+                signature: None,
+                error: Some("Stale mint request".to_string()),
+                slot: 0,
+                deduplicated: false,
+            }).await;
+            msg.ack().await.ok();
+            return;
+        }
+
+        // 4. Effect-level dedup on the stable idempotency_key (empty = no dedup).
+        let dedup_key = (!envelope.idempotency_key.is_empty()).then(|| envelope.idempotency_key.clone());
+        if let Some(prior) =
+            Self::claim_or_replay(&self.dedup_store, dedup_key.as_deref(), &envelope.correlation_id, now_ms)
+        {
+            self.metrics.track_operation("nats_mint_deduplicated", 0.0, prior.success);
+            self.publish_mint_result(&envelope.reply_subject, MintEnergyResultMessage {
+                correlation_id: prior.correlation_id,
+                success: prior.success,
+                signature: prior.signature,
+                error: prior.error,
+                slot: prior.slot,
+                deduplicated: true,
+            }).await;
+            let _ = msg.ack().await;
+            return;
+        }
+
+        // 5. Build, sign (Vault platform_admin), and submit the generation mint.
+        let result = self
+            .signing_service
+            .build_and_submit_generation_mint(
+                &envelope.recipient_wallet,
+                envelope.energy_kwh,
+                &envelope.meter_id,
+                envelope.window_start_ms,
+                &identity,
+                &envelope.correlation_id,
+            )
+            .await;
+
+        let result_msg = match result {
+            Ok((sig, slot)) => {
+                self.idempotency_cache.insert(envelope.correlation_id.clone(), now_ms + 60_000);
+                // Record the effect Done so a re-send with this key replays it
+                // instead of minting a second time (on-chain PDA is the backstop).
+                if let Some(key) = &dedup_key {
+                    self.dedup_store.insert(key.clone(), DedupRecord {
+                        expiry_ms: now_ms + 120_000,
+                        state: DedupState::Done { signature: Some(sig.to_string()), slot },
+                    });
+                }
+                MintEnergyResultMessage {
+                    correlation_id: envelope.correlation_id,
+                    success: true,
+                    signature: Some(sig.to_string()),
+                    error: None,
+                    slot,
+                    deduplicated: false,
+                }
+            }
+            Err(e) => {
+                // Failure is not a completed effect — release the InFlight claim.
+                if let Some(key) = &dedup_key {
+                    self.dedup_store.remove(key);
+                }
+                MintEnergyResultMessage {
+                    correlation_id: envelope.correlation_id,
+                    success: false,
+                    signature: None,
+                    error: Some(format!("{:#}", e)),
+                    slot: 0,
+                    deduplicated: false,
+                }
+            }
+        };
+
+        self.metrics.track_operation("nats_consumer_mint", start_time.elapsed().as_millis() as f64, result_msg.success);
+        self.publish_mint_result(&envelope.reply_subject, result_msg).await;
+        let _ = msg.ack().await;
+    }
+
+    async fn publish_mint_result(&self, subject: &str, result: MintEnergyResultMessage) {
+        let payload = match serde_json::to_vec(&result) {
+            Ok(p) => p,
+            Err(e) => {
+                error!("Failed to serialize mint result for {}: {}", subject, e);
+                return;
+            }
+        };
+        if let Err(e) = self.jetstream.publish(subject.to_string(), payload.into()).await {
+            error!("Failed to publish mint result to {}: {}", subject, e);
+        }
+    }
+
+    /// Read-only on-chain confirmation-status query (`chain.tx.status`). Same
+    /// envelope-auth + RBAC gates as the write paths, but it never signs or
+    /// submits — it just forwards the signature to a `getSignatureStatuses` read
+    /// and replies with the commitment level. Used by meter-service's confirmer
+    /// to advance `submitted` readings to finalized.
+    async fn handle_status(&self, msg: async_nats::jetstream::Message) {
+        let envelope: TxStatusMessage = match serde_json::from_slice(&msg.payload) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("Invalid payload on chain.tx.status: {}", e);
+                let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
+                return;
+            }
+        };
+
+        // Envelope authentication (parity with the write paths; dev accepts unsigned).
+        let canonical =
+            gridtokenx_blockchain_core::rpc::envelope_auth::canonical_status_bytes(&envelope);
+        // Read-only status query — stays on the global signing policy.
+        if let Err(reason) = self.evaluate_envelope_auth(
+            envelope.auth.as_ref(),
+            &envelope.service_identity,
+            &canonical,
+            &envelope.correlation_id,
+            false,
+        ) {
+            self.metrics.track_operation("nats_auth_rejected", 0.0, false);
+            let reason = format!("envelope authentication failed: {}", reason);
+            self.audit_rejection(&envelope.correlation_id, &envelope.service_identity, "status", "auth", reason.clone()).await;
+            self.publish_status_result(&envelope.reply_subject, TxStatusResultMessage {
+                correlation_id: envelope.correlation_id,
+                found: false,
+                confirmed: false,
+                status: "Error".to_string(),
+                slot: 0,
+                error: Some(reason),
+            }).await;
+            let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
+            return;
+        }
+
+        // RBAC — only meter-service (the confirmer) or Admin may query status.
+        let identity = SpiffeIdentity(envelope.service_identity.clone());
+        let role = ServiceRole::from(&identity);
+        if role.require_any(&[ServiceRole::MeterService, ServiceRole::Admin]).is_err() {
+            warn!("🚨 Unauthorised status query from identity: {}", envelope.service_identity);
+            self.audit_rejection(&envelope.correlation_id, &envelope.service_identity, "status", "rbac", "role not permitted to query status".to_string()).await;
+            self.publish_status_result(&envelope.reply_subject, TxStatusResultMessage {
+                correlation_id: envelope.correlation_id,
+                found: false,
+                confirmed: false,
+                status: "Error".to_string(),
+                slot: 0,
+                error: Some(format!("Unauthorised service identity for status: {}", envelope.service_identity)),
+            }).await;
+            let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
+            return;
+        }
+
+        let result = match self.signing_service.signature_status(&envelope.signature).await {
+            Ok((found, confirmed, status, slot)) => TxStatusResultMessage {
+                correlation_id: envelope.correlation_id,
+                found,
+                confirmed,
+                status,
+                slot,
+                error: None,
+            },
+            Err(e) => TxStatusResultMessage {
+                correlation_id: envelope.correlation_id,
+                found: false,
+                confirmed: false,
+                status: "Error".to_string(),
+                slot: 0,
+                error: Some(format!("{:#}", e)),
+            },
+        };
+
+        self.publish_status_result(&envelope.reply_subject, result).await;
+        let _ = msg.ack().await;
+    }
+
+    async fn publish_status_result(&self, subject: &str, result: TxStatusResultMessage) {
+        let payload = match serde_json::to_vec(&result) {
+            Ok(p) => p,
+            Err(e) => {
+                error!("Failed to serialize status result for {}: {}", subject, e);
+                return;
+            }
+        };
+        if let Err(e) = self.jetstream.publish(subject.to_string(), payload.into()).await {
+            error!("Failed to publish status result to {}: {}", subject, e);
+        }
     }
 
     async fn publish_result(&self, subject: &str, result: TxResultMessage) {

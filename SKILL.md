@@ -1,6 +1,6 @@
 ---
 name: gridtokenx-chain-bridge-patterns
-description: Patterns, gotchas, and high-throughput performance guidance for building and maintaining GridTokenX Rust microservices — specifically the chain-bridge service (the Solana signing protocol bridge) and its siblings that use mTLS + SPIFFE identity, connectrpc, NATS JetStream, HashiCorp Vault Transit signing, and Solana RPC. Use this skill whenever the user is working on chain-bridge (src/api.rs, src/main.rs, src/middleware.rs, src/nats_consumer.rs, src/vault.rs), adding a new gRPC handler, adding a new NATS subject, wiring up a new GridTokenX service, debugging mTLS or SPIFFE identity issues, integrating Vault Transit signing, reasoning about RBAC between platform microservices, OR scaling the bridge to high throughput (questions about TPS targets, Vault signing bottlenecks, Solana RPC pooling, NATS worker concurrency, connection reuse, backpressure, latency budgets, or any question framed as "how do we get to N TPS"). Consult this skill even if the user's question sounds generic ("how do I add auth to this handler", "why is my SPIFFE ID not showing up", "this service feels slow", "can we handle more load") when they're in a GridTokenX repo.
+description: Patterns, gotchas, and high-throughput performance guidance for building and maintaining GridTokenX Rust microservices — specifically the chain-bridge service (the Solana signing protocol bridge) and its siblings that use mTLS + SPIFFE identity, connectrpc, NATS JetStream, HashiCorp Vault Transit signing, and Solana RPC. Use this skill whenever the user is working on chain-bridge (crates/chain-bridge-api/src/api/service.rs, crates/chain-bridge-api/src/main.rs, crates/chain-bridge-api/src/middleware.rs, crates/chain-bridge-api/src/nats_consumer/consumer.rs, crates/chain-bridge-api/src/vault.rs), adding a new gRPC handler, adding a new NATS subject, wiring up a new GridTokenX service, debugging mTLS or SPIFFE identity issues, integrating Vault Transit signing, reasoning about RBAC between platform microservices, OR scaling the bridge to high throughput (questions about TPS targets, Vault signing bottlenecks, Solana RPC pooling, NATS worker concurrency, connection reuse, backpressure, latency budgets, or any question framed as "how do we get to N TPS"). Consult this skill even if the user's question sounds generic ("how do I add auth to this handler", "why is my SPIFFE ID not showing up", "this service feels slow", "can we handle more load") when they're in a GridTokenX repo.
 ---
 
 # GridTokenX Chain Bridge Patterns
@@ -72,7 +72,7 @@ Two things about this that trip people up:
 
 ## Adding a new gRPC handler
 
-Follow the existing shape in `src/api.rs`. The five steps, in order:
+Follow the existing shape in `crates/chain-bridge-api/src/api/service.rs`. The five steps, in order:
 
 1. **Add the RPC to `chain_bridge.proto`** — request/response messages and the service method.
 2. **Regenerate** — `buffa` build script emits the `*View` and `*Response` types. If they don't appear in `chain_v1`, check `build.rs` and the `include!(...)` glob.

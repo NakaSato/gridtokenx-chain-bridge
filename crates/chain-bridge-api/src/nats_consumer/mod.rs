@@ -14,7 +14,8 @@ pub(crate) use dashmap::DashMap;
 pub(crate) use tokio_retry::{Retry, strategy::FixedInterval};
 pub(crate) use gridtokenx_blockchain_core::rpc::nats_schema::{
     TxSubmitMessage, TxResultMessage, TxSimulateMessage, TxSimulateResultMessage,
-    TxCancelMessage, TxCancelResultMessage,
+    TxCancelMessage, TxCancelResultMessage, MintEnergyMessage, MintEnergyResultMessage,
+    TxStatusMessage, TxStatusResultMessage,
 };
 pub(crate) use gridtokenx_blockchain_core::rpc::metrics::BlockchainMetrics;
 pub(crate) use gridtokenx_blockchain_core::auth::{ServiceRole, SpiffeIdentity};

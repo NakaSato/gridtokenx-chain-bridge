@@ -298,26 +298,33 @@ Chain Bridge exposes a ConnectRPC service (`ChainBridgeService`) with 12 RPCs:
 ## Source Structure
 
 ```
-gridtokenx-chain-bridge/
-├── src/
-│   ├── main.rs              # Entry point — server bootstrap, Vault init, NATS setup, DLQ monitor
-│   ├── lib.rs               # Library re-exports (api, vault, nats_consumer, harness, middleware)
-│   ├── api.rs               # ChainBridgeGrpcService (12 RPCs, ~1250 lines)
-│   │                        #   ├── SolanaProvider trait (mockable, 12 async methods)
-│   │                        #   ├── RealSolanaProvider (RpcClient delegation)
-│   │                        #   ├── SurfpoolSolanaProvider (LiteSVM simnet)
-│   │                        #   │     └── deploy_core_programs() — 5 .so files, pre-seeded PDAs
-│   │                        #   ├── BlockhashCache (RwLock<Option<(Hash, u64)>>, 2s refresh)
-│   │                        #   ├── extract_role() — 3-tier identity resolution
-│   │                        #   └── sign_and_submit() — policy + blockhash + Vault signing
-│   ├── vault.rs             # VaultProvider trait + VaultTransitClient + InsecureKeypairProvider
-│   ├── middleware.rs         # PeerCertLayer — X.509 SAN → SPIFFE URI extraction
-│   ├── harness.rs           # MtlsAcceptor — custom TLS acceptor, peer cert injection
-│   └── nats_consumer.rs     # NatsConsumer — JetStream pull consumer (submit/simulate/cancel)
-├── tests/
-│   └── invariants.rs        # Invariant tests (RBAC, service authorization, program allowlisting)
-├── build.rs                 # Protobuf code generation (buffa + connectrpc)
-└── Cargo.toml               # Dependencies
+gridtokenx-chain-bridge/                # virtual workspace manifest (members = ["crates/*"])
+├── crates/
+│   ├── chain-bridge-api/               # binary + lib `gridtokenx_chain_bridge` — live signing path
+│   │   ├── src/
+│   │   │   ├── main.rs                  # Entry point — server bootstrap, Vault init, NATS setup, DLQ monitor
+│   │   │   ├── lib.rs                   # Library re-exports (api, vault, nats_consumer, harness, middleware, agent_memory)
+│   │   │   ├── api/                     # ChainBridgeGrpcService (12 RPCs)
+│   │   │   │   ├── provider.rs          #   SolanaProvider trait (mockable, 12 async methods)
+│   │   │   │   │                        #   + RealSolanaProvider (RpcClient delegation)
+│   │   │   │   │                        #   + SurfpoolSolanaProvider (LiteSVM simnet, 5 .so files, pre-seeded PDAs)
+│   │   │   │   │                        #   + BlockhashCache (RwLock<Option<(Hash, u64)>>, 2s refresh)
+│   │   │   │   └── service.rs           #   gRPC handlers, extract_role() (3-tier), sign_and_submit()
+│   │   │   ├── vault.rs                 # VaultProvider trait + VaultTransitClient + InsecureKeypairProvider
+│   │   │   ├── middleware.rs            # PeerCertLayer — X.509 SAN → SPIFFE URI extraction
+│   │   │   ├── harness.rs               # MtlsAcceptor — custom TLS acceptor, peer cert injection
+│   │   │   ├── agent_memory.rs          # embedding / cosine-similarity memory store
+│   │   │   └── nats_consumer/           # NatsConsumer — JetStream pull consumer (submit/simulate/cancel)
+│   │   │       ├── consumer.rs          #   subscribe loop + handle_submit/simulate/cancel + claim_or_replay
+│   │   │       ├── auth.rs              #   envelope auth (cert→CA→SAN→signature)
+│   │   │       └── dedup.rs             #   effect-level dedup types
+│   │   ├── tests/
+│   │   │   └── invariants.rs            # Invariant tests (RBAC, service authorization, program allowlisting)
+│   │   └── build.rs                     # Protobuf code generation (tonic + connectrpc)
+│   ├── chain-bridge-core/              # hexagonal ports + domain types (AuditPort, SignerPort, errors)
+│   ├── chain-bridge-persistence/       # driven adapters over the core ports
+│   └── chain-bridge-protocol/          # generated ConnectRPC bindings
+└── Cargo.toml                          # Virtual workspace manifest
 ```
 
 Proto source: `../gridtokenx-blockchain-core/proto/chain_bridge.proto`

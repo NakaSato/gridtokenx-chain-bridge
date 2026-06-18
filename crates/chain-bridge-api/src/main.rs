@@ -13,6 +13,10 @@ use gridtokenx_chain_bridge::nats_consumer;
 async fn main() -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider().install_default().expect("Failed to install rustls crypto provider");
     let _telemetry_guard = gridtokenx_telemetry::init("gridtokenx-chain-bridge");
+    // External NTP server (Cloudflare primary, Google fallback) as primary wall-clock —
+    // audit hash-chain timestamps + NATS envelope freshness/cert-validity now use agreed
+    // time. Background poller; `time::now()` is non-blocking, degrades to OS clock.
+    gridtokenx_telemetry::time::init_default();
     info!("🚀 GridTokenX Chain Bridge Protocol v1.2 starting...");
 
     let insecure_mode = std::env::var("CHAIN_BRIDGE_INSECURE")

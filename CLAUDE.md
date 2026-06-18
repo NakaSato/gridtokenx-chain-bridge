@@ -132,3 +132,9 @@ adding submodules. Paths below are under `crates/chain-bridge-api/src/`.
   cache contention, mTLS amortisation, observability), and the AI agent-memory patterns.
 - **[README.md](README.md)** — architecture diagram, security/trust model, formal invariants.
 - **`tests/invariants.rs`** — integration tests asserting the safety/liveness properties.
+
+## Search Tooling
+
+> **Use `rg` (ripgrep), never `grep`.** When shelling out to search files, run `rg` —
+> it respects `.gitignore`, skips binaries, and is far faster than `grep`/`find -exec grep`.
+> Reserve plain `grep` only for piping non-file streams.
