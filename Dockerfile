@@ -1,3 +1,6 @@
+# syntax=docker/dockerfile:1.7
+# Chain Bridge — distroless image: binary + its shared libs only.
+# No Rust toolchain, no target/ in the image (target lives in a BuildKit cache mount).
 FROM rust:1.89-bookworm AS builder
 
 # Install build dependencies with cache mount
@@ -12,7 +15,8 @@ RUN <<EOT
         git \
         curl \
         protobuf-compiler \
-        libprotobuf-dev
+        libprotobuf-dev \
+        busybox-static
 EOT
 
 WORKDIR /app
@@ -30,23 +34,32 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --bin gridtokenx-chain-bridge && \
     cp target/release/gridtokenx-chain-bridge /app/gridtokenx-chain-bridge-bin
 
-# Stage 2: Runtime
-FROM debian:bookworm-slim AS runtime
+# Collect the binary + its non-glibc shared libs into a flat lib/ folder.
+# glibc core + the dynamic loader come from the distroless/cc base — skip them.
+RUN set -eux; \
+    BIN=/app/gridtokenx-chain-bridge-bin; \
+    mkdir -p /out/lib; \
+    cp "$BIN" /out/chain-bridge; \
+    cp /bin/busybox /out/busybox; \
+    ldd "$BIN" | awk '/=>/{print $3} !/=>/{print $1}' | grep -E '^/' | sort -u | while read -r lib; do \
+        case "$lib" in \
+            */ld-linux*|*/libc.so*|*/libm.so*|*/libpthread*|*/libdl.so*|*/librt.so*) continue;; \
+        esac; \
+        cp -Lv "$lib" /out/lib/; \
+    done
 
-# Install runtime dependencies
-RUN <<EOT
-    apt-get update
-    apt-get install -y --no-install-recommends \
-        ca-certificates \
-        libssl3 \
-        tzdata \
-        curl
-EOT
+# -----------------------------------------------------------------------------
+# Stage 2: Runtime (distroless)
+# -----------------------------------------------------------------------------
+FROM gcr.io/distroless/cc-debian12 AS runtime
 
 WORKDIR /app
 
-# Copy binary from builder stage
-COPY --from=builder /app/gridtokenx-chain-bridge-bin /app/chain-bridge
+COPY --from=builder /out/chain-bridge /app/chain-bridge
+COPY --from=builder /out/lib/ /app/lib/
+COPY --from=builder /out/busybox /usr/bin/busybox
+
+ENV LD_LIBRARY_PATH=/app/lib
 
 # Expose port (gRPC: 5040)
 EXPOSE 5040
