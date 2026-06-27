@@ -55,3 +55,38 @@ impl ChainBridgeError {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transient_variants_may_retry() {
+        // Node behind / rate-limited / HSM blip — a retry could plausibly succeed.
+        assert!(ChainBridgeError::ChainClient("rpc timeout".into()).is_transient());
+        assert!(ChainBridgeError::Simulation("blockhash not found".into()).is_transient());
+        assert!(ChainBridgeError::Signer("vault 503".into()).is_transient());
+        assert!(ChainBridgeError::Nonce("pool exhausted".into()).is_transient());
+    }
+
+    #[test]
+    fn terminal_variants_must_not_retry() {
+        // Static failures — re-entering the retry loop would just burn attempts.
+        assert!(!ChainBridgeError::PolicyRejected("program not allowed".into()).is_transient());
+        assert!(!ChainBridgeError::Unauthorized("role denied".into()).is_transient());
+        assert!(!ChainBridgeError::InvalidTransaction("bad base64".into()).is_transient());
+        assert!(!ChainBridgeError::Audit("hash-chain break".into()).is_transient());
+    }
+
+    #[test]
+    fn display_carries_variant_prefix_and_message() {
+        assert_eq!(
+            ChainBridgeError::PolicyRejected("program X".into()).to_string(),
+            "policy rejected: program X"
+        );
+        assert_eq!(
+            ChainBridgeError::Unauthorized("role Y".into()).to_string(),
+            "unauthorized: role Y"
+        );
+    }
+}
