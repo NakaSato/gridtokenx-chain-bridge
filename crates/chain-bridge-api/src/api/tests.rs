@@ -879,3 +879,73 @@
         let (resp, _) = service.get_latest_blockhash(settlement_ctx(), request).await.unwrap();
         assert!(!resp.blockhash.is_empty());
     }
+
+    /// Provider returning a scripted `get_signature_statuses` value for every
+    /// call; all other methods delegate to `MockSolanaProvider`. `None` models a
+    /// not-yet-visible signature (pending); `Some(json)` models a landed tx whose
+    /// `err`/`slot` fields drive the confirmation outcome.
+    struct ScriptedStatusProvider(Option<serde_json::Value>);
+
+    #[async_trait]
+    impl SolanaProvider for ScriptedStatusProvider {
+        async fn get_signature_statuses(&self, _s: &[Signature]) -> Result<Response<Vec<Option<serde_json::Value>>>, ClientError> {
+            Ok(Response {
+                context: RpcResponseContext { slot: 101, api_version: None },
+                value: vec![self.0.clone()],
+            })
+        }
+        async fn simulate_transaction(&self, t: &Transaction) -> Result<Response<RpcSimulateTransactionResult>, ClientError> { MockSolanaProvider.simulate_transaction(t).await }
+        async fn send_transaction(&self, t: &Transaction) -> Result<Signature, ClientError> { MockSolanaProvider.send_transaction(t).await }
+        async fn get_latest_blockhash(&self) -> Result<(Hash, u64), ClientError> { MockSolanaProvider.get_latest_blockhash().await }
+        async fn get_balance(&self, p: &Pubkey) -> Result<u64, ClientError> { MockSolanaProvider.get_balance(p).await }
+        async fn get_account(&self, p: &Pubkey) -> Result<Account, ClientError> { MockSolanaProvider.get_account(p).await }
+        async fn get_recent_prioritization_fees(&self, p: &[Pubkey]) -> Result<Vec<RpcPrioritizationFee>, ClientError> { MockSolanaProvider.get_recent_prioritization_fees(p).await }
+        async fn get_token_account_balance(&self, p: &Pubkey) -> Result<serde_json::Value, ClientError> { MockSolanaProvider.get_token_account_balance(p).await }
+        async fn get_slot(&self) -> Result<u64, ClientError> { MockSolanaProvider.get_slot().await }
+        async fn request_airdrop(&self, p: &Pubkey, l: u64) -> Result<Signature, ClientError> { MockSolanaProvider.request_airdrop(p, l).await }
+        async fn get_transaction(&self, s: &Signature) -> Result<serde_json::Value, ClientError> { MockSolanaProvider.get_transaction(s).await }
+        async fn get_epoch_info(&self) -> Result<solana_sdk::epoch_info::EpochInfo, ClientError> { MockSolanaProvider.get_epoch_info().await }
+    }
+
+    fn service_with_status(status: Option<serde_json::Value>) -> ChainBridgeGrpcService {
+        ChainBridgeGrpcService {
+            provider: Arc::new(ScriptedStatusProvider(status)),
+            vault: Arc::new(MockVaultProvider),
+            blockhash_cache: Arc::new(BlockhashCache::new()),
+            transit_key_name: "test-key".to_string(),
+            audit: Arc::new(chain_bridge_persistence::InMemoryAuditStore::new()),
+        }
+    }
+
+    // Confirmed landing (err null + slot) → Confirmed(slot): the mint reply is
+    // success and the aggregator outbox drops the entry.
+    #[tokio::test]
+    async fn resolve_confirmation_confirmed_carries_slot() {
+        let svc = service_with_status(Some(serde_json::json!({ "slot": 4242, "err": null })));
+        let out = svc
+            .resolve_confirmation_bounded(&Signature::from([1u8; 64]), 2, std::time::Duration::from_millis(1))
+            .await;
+        assert_eq!(out, ConfirmOutcome::Confirmed(4242));
+    }
+
+    // Landed-with-error → Errored: mint reply is failure → outbox keeps + retries.
+    // Retry is safe (on-chain gen_mint PDA no-ops a replay of a mint that landed).
+    #[tokio::test]
+    async fn resolve_confirmation_onchain_error_is_errored() {
+        let svc = service_with_status(Some(serde_json::json!({ "slot": 99, "err": { "InstructionError": [0, "Custom"] } })));
+        let out = svc
+            .resolve_confirmation_bounded(&Signature::from([2u8; 64]), 2, std::time::Duration::from_millis(1))
+            .await;
+        assert_eq!(out, ConfirmOutcome::Errored);
+    }
+
+    // Never visible within the budget → Pending: mint reply is failure → outbox
+    // keeps + retries until a later poll confirms.
+    #[tokio::test]
+    async fn resolve_confirmation_unconfirmed_is_pending() {
+        let svc = service_with_status(None);
+        let out = svc
+            .resolve_confirmation_bounded(&Signature::from([3u8; 64]), 3, std::time::Duration::from_millis(1))
+            .await;
+        assert_eq!(out, ConfirmOutcome::Pending);
+    }

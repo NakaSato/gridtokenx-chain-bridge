@@ -4,6 +4,19 @@ use chain_bridge_core::audit::{AuditEntry, AuditOutcome};
 use chain_bridge_core::AuditPort;
 use chain_bridge_persistence::InMemoryAuditStore;
 
+/// Outcome of polling a just-submitted tx for confirmation. Lets the mint path
+/// gate `success` on finality: only `Confirmed` is an `Ok` reply; `Errored` and
+/// `Pending` become `Err` so the aggregator outbox keeps + retries the mint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmOutcome {
+    /// Tx landed without error at `confirmed` commitment; carries the slot.
+    Confirmed(u64),
+    /// Tx landed but with an on-chain error (no second mint occurred).
+    Errored,
+    /// Tx not confirmed within the bounded poll window (unknown — retry).
+    Pending,
+}
+
 pub struct ChainBridgeGrpcService {
     pub(crate) provider: Arc<dyn SolanaProvider>,
     pub(crate) vault: Arc<dyn VaultProvider>,
@@ -167,43 +180,69 @@ impl ChainBridgeGrpcService {
             .sign_and_submit(&serialized, "platform_admin", identity, correlation_id)
             .await?;
 
-        // `sign_and_submit` submits fire-and-forget and returns slot 0 (it never
-        // waits for confirmation). The mint is provenance-critical and low-rate, so
-        // here — unlike the generic submit path — confirm the signature and resolve
-        // the real on-chain slot for the meter-service tracking column. Best-effort:
-        // if confirmation does not land within the bounded window, return slot 0 and
-        // let the chain confirmer backfill finality later.
-        let slot = self.resolve_confirmed_slot(&sig).await;
-        Ok((sig, slot))
+        // `sign_and_submit` submits fire-and-forget (returns slot 0, never waits
+        // for confirmation). The mint is provenance-critical and low-rate, so —
+        // unlike the generic submit path — GATE success on confirmation: only a
+        // `Confirmed(slot)` is reported `Ok` to the caller. An errored or
+        // unconfirmed-in-window mint returns `Err`, so `handle_mint` replies
+        // `success=false` and the aggregator-bridge's durable outbox KEEPS the
+        // entry and retries. Retry is safe and convergent: the on-chain
+        // `(meter_id, window_start_ms)` `gen_mint` PDA no-ops a replay of a mint
+        // that actually landed (energy-token `mint_generation`: `if minted
+        // { return Ok(()) }`), so this can never double-mint — it only closes the
+        // window where an accepted-but-unfinalized mint was previously dropped.
+        match self.resolve_confirmation(&sig).await {
+            ConfirmOutcome::Confirmed(slot) => Ok((sig, slot)),
+            ConfirmOutcome::Errored => Err(anyhow::anyhow!(
+                "generation mint {sig} landed with an on-chain error; not confirmed"
+            )),
+            ConfirmOutcome::Pending => Err(anyhow::anyhow!(
+                "generation mint {sig} unconfirmed within window; outbox will retry"
+            )),
+        }
     }
 
-    /// Polls signature status to resolve the confirmed slot of a just-submitted
-    /// transaction at `confirmed` commitment. Returns the slot once visible, or 0
-    /// if the tx does not confirm within the bounded window (or lands with an
-    /// on-chain error). Localnet/`confirmed` typically resolves in ~1-2s.
-    async fn resolve_confirmed_slot(&self, sig: &Signature) -> u64 {
+    /// Polls signature status to resolve the confirmation outcome of a
+    /// just-submitted transaction at `confirmed` commitment. Distinguishes a
+    /// confirmed landing (with its slot) from an on-chain error and from a
+    /// not-yet-confirmed (pending) tx, so the mint path can gate success on
+    /// finality. Localnet/`confirmed` typically resolves in ~1-2s.
+    async fn resolve_confirmation(&self, sig: &Signature) -> ConfirmOutcome {
         // ~6s budget (24 × 250ms) — comfortably above confirmed-commitment latency
         // without blocking the mint reply indefinitely on a stalled validator.
-        for _ in 0..24 {
+        self.resolve_confirmation_bounded(sig, 24, std::time::Duration::from_millis(250))
+            .await
+    }
+
+    /// Bounded core of [`resolve_confirmation`] — `attempts` polls spaced by
+    /// `delay`. Split out so unit tests can drive it fast (small attempts/delay)
+    /// without the production 6s budget.
+    pub(crate) async fn resolve_confirmation_bounded(
+        &self,
+        sig: &Signature,
+        attempts: u32,
+        delay: std::time::Duration,
+    ) -> ConfirmOutcome {
+        for _ in 0..attempts {
             if let Ok(resp) = self
                 .provider
                 .get_signature_statuses(std::slice::from_ref(sig))
                 .await
             {
                 if let Some(Some(status)) = resp.value.first() {
-                    // A landed-but-failed tx has no slot worth recording.
+                    // A landed-but-failed tx is a terminal on-chain error.
                     let errored = status.get("err").map(|e| !e.is_null()).unwrap_or(false);
                     if errored {
-                        return 0;
+                        return ConfirmOutcome::Errored;
                     }
                     if let Some(slot) = status.get("slot").and_then(serde_json::Value::as_u64) {
-                        return slot;
+                        return ConfirmOutcome::Confirmed(slot);
                     }
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            tokio::time::sleep(delay).await;
         }
-        0
+        ConfirmOutcome::Pending
     }
 
     pub(crate) fn extract_role(&self, ctx: &Context) -> ServiceRole {
