@@ -101,8 +101,11 @@ adding submodules. Paths below are under `crates/chain-bridge-api/src/`.
   `Errored`/`Pending` return `Err`, so `handle_mint` replies `success=false` and the aggregator-bridge
   durable mint outbox keeps + retries. Don't "optimise" this back to returning `Ok` on send — that
   reintroduces the silent accept-but-unfinalized surplus drop. Retry is safe: the on-chain
-  `(meter_id, window_start_ms)` `gen_mint` PDA no-ops a replay of a mint that landed. Side effect:
-  meter-service mint status shows transient `pending`/`failed` until a retry confirms.
+  `(meter_id, window_start_ms)` `gen_mint` PDA no-ops a replay of a mint that landed. The reply is
+  consumed only by the aggregator-bridge outbox (sole caller of `build_and_submit_generation_mint`);
+  it does **not** flow to meter-service's `mint_status` (a read-only projection of `meter_readings`
+  columns no live service writes from a mint reply), so an unconfirmed retry has no user-visible status
+  side effect.
 
 ## Gotchas
 
