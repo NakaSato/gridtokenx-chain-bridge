@@ -95,6 +95,14 @@ adding submodules. Paths below are under `crates/chain-bridge-api/src/`.
   submit is recorded `Done` and replayed to later re-sends; an `InFlight` claim blocks a duplicate on-chain tx;
   a failure releases the claim so a genuine retry can run. This is distinct from the per-`correlation_id`
   `idempotency_cache` that guards JetStream redelivery.
+- **Generation-mint reply is gated on confirmation, not RPC-accept.** Unlike the generic submit path
+  (fire-and-forget, slot 0), `build_and_submit_generation_mint` polls `resolve_confirmation` →
+  `ConfirmOutcome::{Confirmed(slot)|Errored|Pending}` and replies `success` **only** on `Confirmed`;
+  `Errored`/`Pending` return `Err`, so `handle_mint` replies `success=false` and the aggregator-bridge
+  durable mint outbox keeps + retries. Don't "optimise" this back to returning `Ok` on send — that
+  reintroduces the silent accept-but-unfinalized surplus drop. Retry is safe: the on-chain
+  `(meter_id, window_start_ms)` `gen_mint` PDA no-ops a replay of a mint that landed. Side effect:
+  meter-service mint status shows transient `pending`/`failed` until a retry confirms.
 
 ## Gotchas
 
