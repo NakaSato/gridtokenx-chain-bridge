@@ -333,7 +333,7 @@ When you change `SolanaProvider` to async, remember: `MockSolanaProvider` in tes
    ```
    Bound the concurrency (don't use unlimited `buffer_unordered`) so you have a predictable ceiling on in-flight Vault calls. 16–64 is a reasonable range.
 3. **Tune the pull batch size.** JetStream pull consumers fetch N messages per request; the default is often too conservative. Set `max_batch` on the pull config explicitly (128–512 is a good range for high throughput).
-4. **Separate streams per workload class.** `chain.tx.submit` (slow, signs) and `chain.tx.simulate` (faster, read-only) have different latency profiles and saturate different resources. Put them on separate streams with separate consumers so a flood of simulate traffic doesn't starve real submissions, or vice versa.
+4. **Separate streams per workload class.** `chain.tx.submit` (latency-sensitive, user-facing) and `chain.tx.mint` (bulk settlement, confirmation-gated retries) have different latency profiles and saturate different resources. Put them on separate streams with separate consumers so a flood of mint traffic doesn't starve real submissions, or vice versa.
 
 **Watch out for:** per-message `Retry::spawn(retry_strategy, ...)` inside `handle_submit`. With FixedInterval(500ms) × 3, a single flaky Solana call holds that worker for 1.5s. At 10k TPS that's devastating. Either (a) cut retries and push retry responsibility to the caller, or (b) make retry a background task that acks the original message and re-publishes the failed one on a separate `chain.tx.retry` subject.
 

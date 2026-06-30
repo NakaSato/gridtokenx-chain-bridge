@@ -1,4 +1,4 @@
-//! NATS JetStream consumer for chain-bridge tx submit/simulate/cancel.
+//! NATS JetStream consumer for chain-bridge tx submit/cancel.
 //!
 //! Split from the former monolithic `nats_consumer.rs`:
 //! - [`dedup`]     — effect-level dedup types (`DedupRecord`, `DedupState`)
@@ -13,7 +13,7 @@ pub(crate) use futures::StreamExt;
 pub(crate) use dashmap::DashMap;
 pub(crate) use tokio_retry::{Retry, strategy::FixedInterval};
 pub(crate) use gridtokenx_blockchain_core::rpc::nats_schema::{
-    TxSubmitMessage, TxResultMessage, TxSimulateMessage, TxSimulateResultMessage,
+    TxSubmitMessage, TxResultMessage,
     TxCancelMessage, TxCancelResultMessage, MintEnergyMessage, MintEnergyResultMessage,
     TxStatusMessage, TxStatusResultMessage,
 };

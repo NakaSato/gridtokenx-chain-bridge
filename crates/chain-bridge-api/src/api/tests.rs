@@ -1,5 +1,4 @@
     use super::*;
-    use solana_sdk::signature::{Keypair, Signer};
     use solana_client::rpc_response::{Response, RpcResponseContext, RpcSimulateTransactionResult};
     use buffa::view::OwnedView;
     use connectrpc::{Context, ErrorCode};
@@ -167,25 +166,6 @@
 
         let (resp, _) = service.get_balance(authenticated_ctx(), request).await.unwrap();
         assert_eq!(resp.lamports, 1000000000);
-    }
-
-    #[tokio::test]
-    async fn test_simulate_transaction() {
-        let service = create_test_service();
-        let from = Keypair::new();
-        let to = Pubkey::new_unique();
-        let ix = solana_sdk::system_instruction::transfer(&from.pubkey(), &to, 1000);
-        let tx = Transaction::new_with_payer(&[ix], Some(&from.pubkey()));
-        let serialized_tx = bincode::serialize(&tx).unwrap();
-
-        let mut request_owned = SimulateTransactionRequest::default();
-        request_owned.serialized_transaction = serialized_tx;
-        let request = OwnedView::from_owned(&request_owned).unwrap();
-
-        let (resp, _) = service.simulate_transaction(authenticated_ctx(), request).await.unwrap();
-        assert!(resp.success);
-        assert_eq!(resp.compute_units_consumed, 100);
-        assert_eq!(resp.logs[0], "Program log: Hello");
     }
 
     #[tokio::test]
@@ -753,21 +733,6 @@
     }
 
     #[tokio::test]
-    async fn test_simulate_transaction_unauthorized_gateway() {
-        let service = create_test_service();
-        let mut ctx = Context::default();
-        ctx.headers.insert("z-gridtokenx-spiffe-id", "spiffe://gridtokenx.th/prod/apisix".parse().unwrap());
-
-        let mut request_owned = chain_v1::SimulateTransactionRequest::default();
-        request_owned.key_id = "platform_admin".to_string();
-        let request = OwnedView::from_owned(&request_owned).unwrap();
-
-        let result = service.simulate_transaction(ctx, request).await;
-        assert!(result.is_err());
-        assert_eq!(result.err().unwrap().code, ErrorCode::PermissionDenied);
-    }
-
-    #[tokio::test]
     async fn test_get_latest_blockhash_unauthorized_gateway() {
         let service = create_test_service();
         let mut ctx = Context::default();
@@ -834,18 +799,6 @@
 
         let result = service.submit_transaction(reporting_ctx(), request).await;
         assert!(result.is_err(), "Reporting service is read-only");
-        assert_eq!(result.err().unwrap().code, ErrorCode::PermissionDenied);
-    }
-
-    #[tokio::test]
-    async fn test_simulate_transaction_reporting_service_denied() {
-        let service = create_test_service();
-        let mut request_owned = chain_v1::SimulateTransactionRequest::default();
-        request_owned.key_id = "platform_admin".to_string();
-        let request = OwnedView::from_owned(&request_owned).unwrap();
-
-        let result = service.simulate_transaction(reporting_ctx(), request).await;
-        assert!(result.is_err(), "Simulate is write-adjacent; reporting service is excluded");
         assert_eq!(result.err().unwrap().code, ErrorCode::PermissionDenied);
     }
 

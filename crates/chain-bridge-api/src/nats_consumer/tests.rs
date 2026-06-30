@@ -379,23 +379,6 @@
     }
 
     #[test]
-    fn test_tx_simulate_message_deserialization() {
-        let sim_msg = TxSimulateMessage {
-            correlation_id: "sim-456".to_string(),
-            reply_subject: "chain.tx.simresult.sim-456".to_string(),
-            serialized_tx: vec![1, 2, 3],
-            key_id: "platform_admin".to_string(),
-            service_identity: "spiffe://gridtokenx.th/prod/aggregator-bridge".to_string(),
-            created_at_ms: 1000,
-            auth: None,
-        };
-
-        let json = serde_json::to_vec(&sim_msg).unwrap();
-        let parsed: TxSimulateMessage = serde_json::from_slice(&json).unwrap();
-        assert_eq!(parsed.correlation_id, "sim-456");
-    }
-
-    #[test]
     fn test_tx_cancel_message_deserialization() {
         let cancel_msg = TxCancelMessage {
             correlation_id: "cancel-789".to_string(),

@@ -422,35 +422,6 @@ impl ChainBridgeGrpcService {
 }
 
 impl ChainBridgeService for ChainBridgeGrpcService {
-    async fn simulate_transaction(
-        &self,
-        ctx: Context,
-        request: OwnedView<SimulateTransactionRequestView<'static>>,
-    ) -> Result<(SimulateTransactionResponse, Context), ConnectError> {
-        let role = self.extract_role(&ctx);
-        role.require_any(&[ServiceRole::TradingApi, ServiceRole::TradingMatcher, ServiceRole::AggregatorBridge, ServiceRole::IamService, ServiceRole::SettlementService, ServiceRole::Admin])
-            .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
-
-        info!("🔗 gRPC Received simulate_transaction request for key_id: {}", request.key_id);
-        
-        let tx: Transaction = bincode::deserialize(&request.serialized_transaction)
-            .map_err(|e| ConnectError::new(ErrorCode::InvalidArgument, format!("Invalid transaction format: {}", e)))?;
-
-        match self.provider.simulate_transaction(&tx).await {
-            Ok(resp) => {
-                let mut response = SimulateTransactionResponse::default();
-                response.success = resp.value.err.is_none();
-                response.compute_units_consumed = resp.value.units_consumed.unwrap_or(0);
-                response.logs = resp.value.logs.unwrap_or_default();
-                Ok((response, ctx))
-            }
-            Err(e) => {
-                error!("Solana RPC simulate error: {}", e);
-                Err(ConnectError::new(ErrorCode::Internal, "Solana RPC simulation failed"))
-            }
-        }
-    }
-
     async fn submit_transaction(
         &self,
         ctx: Context,

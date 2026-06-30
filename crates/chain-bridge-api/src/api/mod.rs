@@ -28,7 +28,7 @@ pub(crate) use gridtokenx_blockchain_core::auth::ServiceRole;
 // Test-only request constructors (handlers consume the `*View`/`*Response` types).
 #[cfg(test)]
 pub(crate) use chain_v1::{
-    GetBalanceRequest, GetAccountDataRequest, SimulateTransactionRequest, SubmitTransactionRequest,
+    GetBalanceRequest, GetAccountDataRequest, SubmitTransactionRequest,
 };
 
 pub(crate) use chain_v1::{
@@ -40,7 +40,6 @@ pub(crate) use chain_v1::{
     GetTokenAccountBalanceRequestView, GetTokenAccountBalanceResponse,
     GetSignatureStatusRequestView, GetSignatureStatusResponse,
     GetSlotRequestView, GetSlotResponse,
-    SimulateTransactionRequestView, SimulateTransactionResponse,
     SubmitTransactionRequestView, SubmitTransactionResponse,
     PrioritizationFee,
 };

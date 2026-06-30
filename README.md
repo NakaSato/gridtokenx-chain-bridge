@@ -189,8 +189,8 @@ The System Program (`11111111111111111111111111`) is always allowed for signing-
                                   │ Concurrency: 32 (for_each_conc)  │
                                   │                                  │
                                   │ chain.tx.submit  → handle_submit │
-                                  │ chain.tx.simulate → handle_sim   │
                                   │ chain.tx.cancel  → handle_cancel │
+                                  │ chain.tx.mint    → handle_mint   │
                                   └──────────────────────────────────┘
 
   Terminated / malformed messages:
@@ -209,8 +209,6 @@ NATS message schemas (defined in `gridtokenx-blockchain-core`):
 |---------|-----------|--------|
 | `TxSubmitMessage` | Publisher → Bridge | `correlation_id`, `reply_subject`, `serialized_tx`, `key_id`, `skip_preflight`, `retry_count`, `service_identity`, `created_at_ms`, `auth?` |
 | `TxResultMessage` | Bridge → Publisher | `correlation_id`, `success`, `signature?`, `error?`, `slot` |
-| `TxSimulateMessage` | Publisher → Bridge | `correlation_id`, `reply_subject`, `serialized_tx`, `key_id`, `service_identity`, `created_at_ms`, `auth?` |
-| `TxSimulateResultMessage` | Bridge → Publisher | `correlation_id`, `success`, `compute_units_consumed`, `error_message`, `logs` |
 | `TxCancelMessage` | Publisher → Bridge | `correlation_id`, `reply_subject`, `service_identity`, `created_at_ms`, `auth?` |
 | `TxCancelResultMessage` | Bridge → Publisher | `correlation_id`, `success`, `error?` |
 
@@ -257,7 +255,7 @@ is flipped on.
 ### NATS JetStream Consumer
 - Pull-based consumer with 32-way concurrent message processing (`for_each_concurrent(32, ...)`).
 - Batch size 128, max waiting 512 — optimized for high throughput.
-- Three handlers: `chain.tx.submit`, `chain.tx.simulate`, `chain.tx.cancel`.
+- Handlers: `chain.tx.submit`, `chain.tx.cancel`, `chain.tx.mint`, `chain.tx.status`.
 - DLQ monitoring on `chain.tx.dlq.*` for failed transactions.
 - Idempotency cache (`DashMap`) with 5s automatic TTL cleanup — prevents double-submission within 60s windows.
 - Staleness check (55s) rejects expired transactions before signing.
@@ -502,7 +500,7 @@ Chain Bridge depends on `gridtokenx-blockchain-core` for cross-service shared ty
 | `auth` | `SpiffeIdentity`, `ServiceRole` — identity mapping and RBAC |
 | `policy` | `PolicyEngine` — per-instruction program ID validation |
 | `config` | `SolanaProgramsConfig` — allowlisted program IDs per environment |
-| `rpc::nats_schema` | `TxSubmitMessage`, `TxResultMessage`, `TxSimulateMessage`, etc. |
+| `rpc::nats_schema` | `TxSubmitMessage`, `TxResultMessage`, `TxCancelMessage`, etc. |
 | `rpc::metrics` | `BlockchainMetrics` trait for observability |
 
 ---

@@ -160,7 +160,6 @@ impl NatsConsumer {
                         Ok(msg) => {
                             match msg.subject.as_str() {
                                 "chain.tx.submit" => self_clone.handle_submit(msg).await,
-                                "chain.tx.simulate" => self_clone.handle_simulate(msg).await,
                                 "chain.tx.cancel" => self_clone.handle_cancel(msg).await,
                                 "chain.tx.mint" => self_clone.handle_mint(msg).await,
                                 "chain.tx.status" => self_clone.handle_status(msg).await,
@@ -475,112 +474,6 @@ impl NatsConsumer {
 
         self.metrics.track_operation("nats_consumer_submit", start_time.elapsed().as_millis() as f64, result_msg.success);
         self.publish_result(&envelope.reply_subject, result_msg).await;
-        let _ = msg.ack().await;
-    }
-
-    async fn handle_simulate(&self, msg: async_nats::jetstream::Message) {
-        let envelope: TxSimulateMessage = match serde_json::from_slice(&msg.payload) {
-            Ok(e) => e,
-            Err(e) => {
-                warn!("Invalid payload on chain.tx.simulate: {}", e);
-                let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
-                return;
-            }
-        };
-
-        // 0. Envelope authentication (see handle_submit).
-        let canonical =
-            gridtokenx_blockchain_core::rpc::envelope_auth::canonical_simulate_bytes(&envelope);
-        if let Err(reason) = self.evaluate_envelope_auth(
-            envelope.auth.as_ref(),
-            &envelope.service_identity,
-            &canonical,
-            &envelope.correlation_id,
-            false,
-        ) {
-            self.metrics.track_operation("nats_auth_rejected", 0.0, false);
-            let reason = format!("envelope authentication failed: {}", reason);
-            self.audit_rejection(&envelope.correlation_id, &envelope.service_identity, "simulate", "auth", reason.clone()).await;
-            let result_msg = TxSimulateResultMessage {
-                correlation_id: envelope.correlation_id,
-                success: false,
-                compute_units_consumed: 0,
-                error_message: reason,
-                logs: vec![],
-            };
-            self.publish_simulate_result(&envelope.reply_subject, result_msg).await;
-            let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
-            return;
-        }
-
-        // Identity Check
-        let role = ServiceRole::from(&SpiffeIdentity(envelope.service_identity.clone()));
-        if role == ServiceRole::Unknown {
-            warn!("🚨 Unauthorised NATS simulate identity: {}", envelope.service_identity);
-            self.audit_rejection(&envelope.correlation_id, &envelope.service_identity, "simulate", "rbac", "unknown service role".to_string()).await;
-            // Reply with an explicit error — see handle_submit's RBAC branch.
-            let result_msg = TxSimulateResultMessage {
-                correlation_id: envelope.correlation_id,
-                success: false,
-                compute_units_consumed: 0,
-                error_message: format!("Unauthorised service identity: {}", envelope.service_identity),
-                logs: vec![],
-            };
-            self.publish_simulate_result(&envelope.reply_subject, result_msg).await;
-            let _ = msg.ack_with(async_nats::jetstream::AckKind::Term).await;
-            return;
-        }
-
-        // Staleness check (55s) — created_at_ms is inside the signed canonical
-        // bytes, so this bounds replay of captured signed envelopes (submit and
-        // cancel already had it; simulate was the gap).
-        let now_ms = gridtokenx_telemetry::time::now().timestamp_millis() as u64;
-        if now_ms.saturating_sub(envelope.created_at_ms) > 55_000 {
-            warn!("Rejecting stale simulate request: {}", envelope.correlation_id);
-            self.audit_rejection(&envelope.correlation_id, &envelope.service_identity, "simulate", "stale", "stale simulate request".to_string()).await;
-            let result_msg = TxSimulateResultMessage {
-                correlation_id: envelope.correlation_id,
-                success: false,
-                compute_units_consumed: 0,
-                error_message: "Simulate request stale".to_string(),
-                logs: vec![],
-            };
-            self.publish_simulate_result(&envelope.reply_subject, result_msg).await;
-            let _ = msg.ack().await;
-            return;
-        }
-
-        // Real simulation
-        let tx: Result<Transaction, _> = bincode::deserialize(&envelope.serialized_tx);
-        let result_msg = match tx {
-            Ok(t) => {
-                match self.signing_service.provider().simulate_transaction(&t).await {
-                    Ok(resp) => TxSimulateResultMessage {
-                        correlation_id: envelope.correlation_id,
-                        success: resp.value.err.is_none(),
-                        compute_units_consumed: resp.value.units_consumed.unwrap_or(0),
-                        error_message: resp.value.err.map(|e| format!("{:?}", e)).unwrap_or_default(),
-                        logs: resp.value.logs.unwrap_or_default(),
-                    },
-                    Err(e) => TxSimulateResultMessage {
-                        correlation_id: envelope.correlation_id,
-                        success: false,
-                        compute_units_consumed: 0,
-                        error_message: e.to_string(),
-                        logs: vec![],
-                    },
-                }
-            }
-            Err(e) => TxSimulateResultMessage {
-                correlation_id: envelope.correlation_id,
-                success: false,
-                compute_units_consumed: 0,
-                error_message: format!("Deserialization error: {}", e),
-                logs: vec![],
-            },
-        };
-
-        self.publish_simulate_result(&envelope.reply_subject, result_msg).await;
         let _ = msg.ack().await;
     }
 
@@ -975,19 +868,6 @@ impl NatsConsumer {
         };
         if let Err(e) = self.jetstream.publish(subject.to_string(), payload.into()).await {
             error!("Failed to publish cancel result to {}: {}", subject, e);
-        }
-    }
-
-    async fn publish_simulate_result(&self, subject: &str, result: TxSimulateResultMessage) {
-        let payload = match serde_json::to_vec(&result) {
-            Ok(p) => p,
-            Err(e) => {
-                error!("Failed to serialize simulate result for {}: {}", subject, e);
-                return;
-            }
-        };
-        if let Err(e) = self.jetstream.publish(subject.to_string(), payload.into()).await {
-            error!("Failed to publish simulate result to {}: {}", subject, e);
         }
     }
 
