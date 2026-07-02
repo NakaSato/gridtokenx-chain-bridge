@@ -115,10 +115,10 @@ async fn main() -> anyhow::Result<()> {
                         // aborted when the main consumer returns so the next
                         // reconnect starts a fresh pair.
                         let dlq_jetstream = jetstream.clone();
-                        let dlq_signing_service = nats_grpc_service.clone();
+                        let dlq_metrics = nats_metrics.clone();
                         let dlq_handle = tokio::spawn(async move {
                             info!("🚨 Starting NATS DLQ monitor");
-                            if let Err(e) = run_dlq_monitor(dlq_jetstream, dlq_signing_service).await {
+                            if let Err(e) = run_dlq_monitor(dlq_jetstream, dlq_metrics).await {
                                 error!("❌ DLQ monitor error: {}", e);
                             }
                         });
@@ -212,7 +212,10 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_dlq_monitor(js: async_nats::jetstream::Context, _service: Arc<ChainBridgeGrpcService>) -> anyhow::Result<()> {
+async fn run_dlq_monitor(
+    js: async_nats::jetstream::Context,
+    metrics: Arc<dyn gridtokenx_blockchain_core::rpc::metrics::BlockchainMetrics>,
+) -> anyhow::Result<()> {
     // Ensure DLQ stream exists
     let stream = js.get_or_create_stream(async_nats::jetstream::stream::Config {
         name: "CHAIN_TX_DLQ".to_string(),
@@ -230,6 +233,11 @@ async fn run_dlq_monitor(js: async_nats::jetstream::Context, _service: Arc<Chain
         match result {
             Ok(msg) => {
                 error!("🔥 DEAD LETTER DETECTED: subject={} payload_size={}", msg.subject, msg.payload.len());
+                // F4: count DLQ hits through the metrics port so a real backend can alert.
+                // NOTE: the recorder is currently `NoopMetrics` (main.rs) — this is a no-op
+                // until a Prometheus impl is wired; the hook + loud log are the signal today.
+                // `track_operation` carries no labels, so the subject stays in the log only.
+                metrics.track_operation("dlq_dead_letter", msg.payload.len() as f64, false);
                 msg.ack_with(async_nats::jetstream::AckKind::Ack).await.ok();
             }
             Err(e) => error!("DLQ monitor error: {}", e),

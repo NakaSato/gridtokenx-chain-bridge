@@ -78,22 +78,10 @@ impl NatsConsumer {
     pub async fn start(self) -> anyhow::Result<()> {
         info!("📥 NATS Consumer starting...");
         
-        // Ensure stream exists
-        let stream = self.jetstream.get_or_create_stream(async_nats::jetstream::stream::Config {
+        // Ensure stream exists (idempotent; each run_consumer re-fetches its own handle).
+        self.jetstream.get_or_create_stream(async_nats::jetstream::stream::Config {
             name: "CHAIN_TX".to_string(),
             subjects: vec!["chain.tx.*".to_string()],
-            ..Default::default()
-        }).await?;
-
-        // Pull consumer with optimized batching (Wall 3 mitigation).
-        // Explicit idle_heartbeat + ack_wait so a jittery CB<->NATS link recovers
-        // instead of choking with repeated "missed idle heartbeat" (see start loop).
-        let consumer = stream.get_or_create_consumer("chain-bridge-worker", async_nats::jetstream::consumer::pull::Config {
-            durable_name: Some("chain-bridge-worker".to_string()),
-            ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
-            ack_wait: std::time::Duration::from_secs(30),
-            max_batch: 128,
-            max_waiting: 512,
             ..Default::default()
         }).await?;
 
@@ -111,20 +99,90 @@ impl NatsConsumer {
         });
 
         let self_arc = Arc::new(self);
+
+        // F1 (HOL blocking): TWO independent pull consumers on the CHAIN_TX stream, with
+        // DISJOINT subject filters, so the slow mint confirm-poll (handle_mint polls on-chain
+        // finality, seconds) can never occupy the concurrency slots that serve the fast
+        // submit/simulate/cancel/status path. Each consumer has its own durable name (→ its
+        // own server-side cursor), ack_wait, and concurrency budget. Same durable names across
+        // replicas still form pull queue-groups, so horizontal scaling is preserved.
+        // F2: the mint consumer's ack_wait (90s) exceeds the worst-case confirmation window so
+        // a single delivery completes within one lease — no staleness×redelivery thrash.
+        let fast = Self::run_consumer(
+            self_arc.clone(),
+            "chain-bridge-worker",
+            vec![
+                "chain.tx.submit".to_string(),
+                "chain.tx.simulate".to_string(),
+                "chain.tx.cancel".to_string(),
+                "chain.tx.status".to_string(),
+            ],
+            std::time::Duration::from_secs(30),
+            32,
+        );
+        let mint = Self::run_consumer(
+            self_arc.clone(),
+            "chain-bridge-mint-worker",
+            vec!["chain.tx.mint".to_string()],
+            std::time::Duration::from_secs(90),
+            8,
+        );
+
+        // Both loop forever; an unrecoverable error in EITHER propagates so the main()
+        // supervisor reconnects NATS from scratch.
+        tokio::try_join!(fast, mint)?;
+        Ok(())
+    }
+
+    /// One pull consumer's resilience loop: (re)open the messages stream and dispatch each
+    /// message by subject. `filter_subjects` scopes which subjects this consumer pulls — the
+    /// fast and mint consumers use DISJOINT filters so no message is processed twice. Returns
+    /// `Err` only when the messages stream can't be reopened after repeated attempts (bubbled
+    /// to the main supervisor, which reconnects NATS).
+    async fn run_consumer(
+        self_arc: Arc<Self>,
+        durable: &'static str,
+        filter_subjects: Vec<String>,
+        ack_wait: std::time::Duration,
+        concurrency: usize,
+    ) -> anyhow::Result<()> {
+        // Re-fetch the (already-created) stream handle for this consumer's task.
+        let stream = self_arc
+            .jetstream
+            .get_or_create_stream(async_nats::jetstream::stream::Config {
+                name: "CHAIN_TX".to_string(),
+                subjects: vec!["chain.tx.*".to_string()],
+                ..Default::default()
+            })
+            .await?;
+
+        // Pull consumer with optimized batching (Wall 3 mitigation). Explicit idle_heartbeat +
+        // ack_wait so a jittery CB<->NATS link recovers instead of choking with repeated
+        // "missed idle heartbeat".
+        let consumer = stream
+            .get_or_create_consumer(durable, async_nats::jetstream::consumer::pull::Config {
+                durable_name: Some(durable.to_string()),
+                ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
+                ack_wait,
+                max_batch: 128,
+                max_waiting: 512,
+                filter_subjects,
+                ..Default::default()
+            })
+            .await?;
+        info!("📥 NATS consumer '{durable}' ready (ack_wait={ack_wait:?}, concurrency={concurrency})");
+
         let mut backoff_ms = 100u64;
         let mut create_failures = 0u32;
 
-        // Resilience loop. A missed-heartbeat or transient error can *end* the
-        // `messages()` stream; without re-creating it the consumer task would
-        // exit for good and messages would pile up unprocessed (the dead-consumer
-        // bug). On stream end we re-open the pull stream and keep going. Repeated
-        // failures to open the stream bubble up to the outer supervisor in
-        // `main()`, which reconnects NATS from scratch.
+        // Resilience loop. A missed-heartbeat or transient error can *end* the `messages()`
+        // stream; without re-creating it the consumer task would exit for good and messages
+        // would pile up unprocessed (the dead-consumer bug). On stream end we re-open the pull
+        // stream and keep going.
         loop {
-            // Per-pull batch MUST stay <= the consumer's `max_batch` (128) or the
-            // server rejects every pull (409 ExceededMaxRequestBatch) — the default
-            // `consumer.messages()` asks for 200 and silently starves. Explicit
-            // heartbeat lets the resilience loop notice a genuinely dead link.
+            // Per-pull batch MUST stay <= the consumer's `max_batch` (128) or the server
+            // rejects every pull (409 ExceededMaxRequestBatch) — the default
+            // `consumer.messages()` asks for 200 and silently starves.
             let messages = match consumer
                 .stream()
                 .max_messages_per_batch(100)
@@ -142,18 +200,20 @@ impl NatsConsumer {
                     create_failures += 1;
                     if create_failures >= 5 {
                         return Err(anyhow::anyhow!(
-                            "NATS messages stream unrecoverable after {create_failures} attempts: {e}"
+                            "NATS messages stream for '{durable}' unrecoverable after {create_failures} attempts: {e}"
                         ));
                     }
-                    error!("Failed to open NATS messages stream (attempt {create_failures}): {e}; retrying in {backoff_ms}ms");
+                    error!("Failed to open NATS messages stream for '{durable}' (attempt {create_failures}): {e}; retrying in {backoff_ms}ms");
                     tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
                     backoff_ms = (backoff_ms * 2).min(5_000);
                     continue;
                 }
             };
 
-            // Concurrent message processing (Wall 3 mitigation)
-            messages.for_each_concurrent(32, |result| {
+            // Concurrent message processing (Wall 3 mitigation). The match handles every
+            // subject; each consumer only RECEIVES its filtered subset, so the extra arms are
+            // inert (defense-in-depth if a filter ever widens).
+            messages.for_each_concurrent(concurrency, |result| {
                 let self_clone = self_arc.clone();
                 async move {
                     match result {
@@ -170,13 +230,13 @@ impl NatsConsumer {
                             }
                         }
                         Err(e) => {
-                            error!("NATS message error: {}", e);
+                            error!("NATS message error on '{durable}': {}", e);
                         }
                     }
                 }
             }).await;
 
-            warn!("NATS messages stream ended; recreating consumer pull stream");
+            warn!("NATS messages stream '{durable}' ended; recreating consumer pull stream");
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
     }
