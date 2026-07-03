@@ -17,6 +17,48 @@ pub(crate) enum ConfirmOutcome {
     Pending,
 }
 
+/// Which stage of `sign_and_submit` failed. Callers that need to map a
+/// failure to a specific status code (e.g. `submit_transaction`'s gRPC
+/// response) should `downcast_ref::<SignSubmitStage>()` the returned
+/// `anyhow::Error` rather than pattern-matching its `Display` text — the
+/// text is for logs/audit, not for classification, and free-text matching
+/// silently breaks the moment a message is reworded.
+#[derive(Debug)]
+pub(crate) enum SignSubmitStage {
+    /// `bincode::deserialize` couldn't parse the transaction.
+    InvalidFormat(String),
+    /// `PolicyEngine::validate_transaction` denied the request (unauthorized
+    /// role/program, dev-bypass excluded).
+    PolicyRejected(String),
+    /// Blockhash cache empty and the slow-path RPC refresh also failed.
+    BlockhashRefreshFailed(String),
+    /// Pre-sign simulation found a definitive on-chain failure (not an RPC
+    /// error, which is advisory and doesn't reach this variant).
+    SimulationRejected(String),
+    /// Vault Transit couldn't produce a signature.
+    VaultSigningFailed(String),
+    /// `key_id` isn't the recognized `platform_admin` signer.
+    KeyNotAuthorized(String),
+    /// The signed transaction was rejected or failed to reach the cluster.
+    SubmissionFailed(String),
+}
+
+impl std::fmt::Display for SignSubmitStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidFormat(e) => write!(f, "Invalid transaction format: {e}"),
+            Self::PolicyRejected(reason) => write!(f, "Policy Engine rejection: {reason}"),
+            Self::BlockhashRefreshFailed(e) => write!(f, "Failed to refresh blockhash: {e}"),
+            Self::SimulationRejected(reason) => write!(f, "{reason}"),
+            Self::VaultSigningFailed(e) => write!(f, "Vault Transit signing failed: {e}"),
+            Self::KeyNotAuthorized(key_id) => write!(f, "Key ID not authorized: {key_id}"),
+            Self::SubmissionFailed(e) => write!(f, "Solana RPC submission failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for SignSubmitStage {}
+
 pub struct ChainBridgeGrpcService {
     pub(crate) provider: Arc<dyn SolanaProvider>,
     pub(crate) vault: Arc<dyn VaultProvider>,
@@ -284,7 +326,7 @@ impl ChainBridgeGrpcService {
     /// Reusable signing and submission logic for both gRPC and NATS
     pub async fn sign_and_submit(&self, serialized_tx: &[u8], key_id: &str, identity: &gridtokenx_blockchain_core::auth::SpiffeIdentity, correlation_id: &str) -> anyhow::Result<(Signature, u64)> {
         let mut transaction: Transaction = bincode::deserialize(serialized_tx)
-            .map_err(|e| anyhow::anyhow!("Invalid transaction format: {}", e))?;
+            .map_err(|e| SignSubmitStage::InvalidFormat(e.to_string()))?;
 
         if let Err(e) =
             gridtokenx_blockchain_core::policy::PolicyEngine::validate_transaction(identity, &transaction)
@@ -297,7 +339,7 @@ impl ChainBridgeGrpcService {
                 AuditOutcome::Rejected { stage: "policy".to_string(), reason: reason.clone() },
             )
             .await;
-            return Err(anyhow::anyhow!("Policy Engine rejection: {}", reason));
+            return Err(SignSubmitStage::PolicyRejected(reason).into());
         }
 
         if key_id == "platform_admin" {
@@ -310,7 +352,7 @@ impl ChainBridgeGrpcService {
                         // Fallback to slow path if cache is empty (e.g. at startup)
                         info!("⚠️ Blockhash cache empty, performing slow-path RPC refresh");
                         self.provider.get_latest_blockhash().await
-                            .map_err(|e| anyhow::anyhow!("Failed to refresh blockhash: {}", e))?
+                            .map_err(|e| SignSubmitStage::BlockhashRefreshFailed(e.to_string()))?
                     }
                 };
                 
@@ -342,7 +384,7 @@ impl ChainBridgeGrpcService {
                             },
                         )
                         .await;
-                        return Err(anyhow::anyhow!(reason));
+                        return Err(SignSubmitStage::SimulationRejected(reason).into());
                     }
                     Ok(sim) => {
                         info!(
@@ -370,7 +412,7 @@ impl ChainBridgeGrpcService {
             
             // 3. Request signature from Vault
             let signature = self.vault.sign_message(&self.transit_key_name, &message_data).await
-                .context("Vault Transit signing failed")?;
+                .map_err(|e| SignSubmitStage::VaultSigningFailed(e.to_string()))?;
 
             // 4. Attach signature at slot 0 (the fee payer slot)
             // Ensure the signatures vector is correctly sized
@@ -392,7 +434,7 @@ impl ChainBridgeGrpcService {
                 },
             )
             .await;
-            return Err(anyhow::anyhow!("Key ID not authorized: {}", key_id));
+            return Err(SignSubmitStage::KeyNotAuthorized(key_id.to_string()).into());
         }
 
         let sig = match self.provider.send_transaction(&transaction).await {
@@ -405,7 +447,7 @@ impl ChainBridgeGrpcService {
                     AuditOutcome::Rejected { stage: "submit".to_string(), reason: e.to_string() },
                 )
                 .await;
-                return Err(anyhow::anyhow!("Solana RPC submission failed: {}", e));
+                return Err(SignSubmitStage::SubmissionFailed(e.to_string()).into());
             }
         };
 
@@ -451,15 +493,30 @@ impl ChainBridgeService for ChainBridgeGrpcService {
                 Ok((response, ctx))
             }
             Err(e) => {
-                let err_msg = format!("{:#}", e);
-                error!("Transaction submission failed: {}", err_msg);
-                
-                let (code, msg) = if err_msg.contains("authorized") {
-                    (ErrorCode::PermissionDenied, "Key ID not authorized")
-                } else if err_msg.contains("format") {
-                    (ErrorCode::InvalidArgument, "Invalid transaction format")
-                } else {
-                    (ErrorCode::Internal, "Transaction submission failed")
+                error!("Transaction submission failed: {:#}", e);
+
+                // Classify by the typed stage marker, not by matching Display
+                // text — free-text matching silently breaks the moment a
+                // message is reworded (see SignSubmitStage's doc comment).
+                let (code, msg) = match e.downcast_ref::<SignSubmitStage>() {
+                    Some(SignSubmitStage::InvalidFormat(_)) => {
+                        (ErrorCode::InvalidArgument, "Invalid transaction format")
+                    }
+                    Some(SignSubmitStage::PolicyRejected(_)) => {
+                        (ErrorCode::PermissionDenied, "Policy Engine rejection")
+                    }
+                    Some(SignSubmitStage::KeyNotAuthorized(_)) => {
+                        (ErrorCode::PermissionDenied, "Key ID not authorized")
+                    }
+                    Some(SignSubmitStage::SimulationRejected(_)) => {
+                        (ErrorCode::FailedPrecondition, "Transaction would fail simulation")
+                    }
+                    Some(
+                        SignSubmitStage::BlockhashRefreshFailed(_)
+                        | SignSubmitStage::VaultSigningFailed(_)
+                        | SignSubmitStage::SubmissionFailed(_),
+                    ) => (ErrorCode::Unavailable, "Transaction submission failed"),
+                    None => (ErrorCode::Internal, "Transaction submission failed"),
                 };
                 Err(ConnectError::new(code, msg))
             }

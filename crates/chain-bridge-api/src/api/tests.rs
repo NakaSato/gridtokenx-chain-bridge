@@ -204,6 +204,44 @@
         assert_eq!(result.err().unwrap().code, ErrorCode::PermissionDenied);
     }
 
+    fn trading_matcher_ctx() -> Context {
+        let mut ctx = Context::default();
+        ctx.headers.insert(
+            "z-gridtokenx-spiffe-id",
+            "spiffe://gridtokenx.th/prod/trading-service/matcher".parse().unwrap(),
+        );
+        ctx
+    }
+
+    /// `submit_transaction` classifies a PolicyEngine denial (real permission
+    /// rejection — TradingMatcher isn't allowed to invoke the Oracle program)
+    /// as PermissionDenied via SignSubmitStage, not by matching free-text.
+    /// Regression guard for the substring-matching bug: this path was
+    /// previously untested at the gRPC-code level.
+    #[tokio::test]
+    async fn test_submit_transaction_policy_rejection_is_permission_denied() {
+        let service = create_test_service();
+        let config = gridtokenx_blockchain_core::config::SolanaProgramsConfig::default();
+        let oracle_program_id: Pubkey = config.oracle_program_id.parse().unwrap();
+
+        let ix = solana_sdk::instruction::Instruction {
+            program_id: oracle_program_id,
+            accounts: vec![],
+            data: vec![],
+        };
+        let tx = Transaction::new_with_payer(&[ix], Some(&Pubkey::default()));
+        let serialized_tx = bincode::serialize(&tx).unwrap();
+
+        let mut request_owned = SubmitTransactionRequest::default();
+        request_owned.serialized_transaction = serialized_tx;
+        request_owned.key_id = "platform_admin".to_string();
+        let request = OwnedView::from_owned(&request_owned).unwrap();
+
+        let result = service.submit_transaction(trading_matcher_ctx(), request).await;
+        assert!(result.is_err(), "TradingMatcher must not be able to invoke the Oracle program");
+        assert_eq!(result.err().unwrap().code, ErrorCode::PermissionDenied);
+    }
+
     #[tokio::test]
     async fn test_get_account_data_exists() {
         let service = create_test_service();
